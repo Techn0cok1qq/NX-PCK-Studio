@@ -13,7 +13,7 @@
 #include "skin3d.hpp"
 #include "util.hpp"
 
-static const char* APP_VER = "v1.1.0";
+static const char* APP_VER = "v1.0.0";
 
 // ---------- 色 (PCK-studio-Web の CSS と同じ) ----------
 struct C { uint8_t r, g, b, a = 255; };
@@ -274,8 +274,14 @@ static std::string status = "";
 static C statusColor = YEL;
 static void setStatus(const std::string& s, bool bad = false) { status = s; statusColor = bad ? RED_HI : YEL; }
 
-struct Pkg { std::vector<pck::Asset> a; std::string name; bool dirty = false; } P;
-static std::vector<std::pair<std::string, std::string>> locEntries;
+struct Pkg { std::vector<pck::Asset> a; std::string name; bool dirty = false; uint32_t type = 8; } P;
+typedef std::vector<std::pair<std::string, std::string>> KV;
+static KV locEntries;            // 現在の localisation.loc の中身 (表示用)
+static KV locBase, locOver;      // 開いたPCKのloc / 手で編集したloc (編集が優先)
+static std::vector<std::string> locDel;
+static bool home = true;         // 起動直後のホーム画面
+static int homeFocus = 0;
+static void kvSet(KV& v, const std::string& k, const std::string& val) { for (auto& e : v) if (e.first == k) { e.second = val; return; } v.push_back({k, val}); }
 static int sel = 0;
 static std::string lastFolder, lastFile;
 
@@ -298,21 +304,26 @@ static std::string packNameEff() {
     for (auto& a : P.a) if (isSkin(a) && !getProp(a, "DISPLAYNAME").empty()) return getProp(a, "DISPLAYNAME");
     return "Skin Pack";
 }
-static void rebuildLoc() {  // 〜ID プロパティ(IDS_…)と対応する文字列から localisation.loc を作る
-    locEntries.clear();
-    auto add = [&](const std::string& k, const std::string& v) { for (auto& e : locEntries) if (e.first == k) return; locEntries.push_back({k, v}); };
-    add("IDS_DISPLAY_NAME", packNameEff());
+static void rebuildLoc() {  // 〜ID プロパティ(IDS_…)と対応する文字列 + 編集したlocから localisation.loc を作る
+    locEntries = locBase;
+    kvSet(locEntries, "IDS_DISPLAY_NAME", packNameEff());
     for (auto& a : P.a)
         for (auto& p : a.props)
             if (p.key.size() > 2 && p.key.compare(p.key.size() - 2, 2, "ID") == 0 && startsWith(p.value, "IDS_")) {
                 std::string t = getProp(a, p.key.substr(0, p.key.size() - 2));
-                if (!t.empty()) add(p.value, t);
+                if (!t.empty()) kvSet(locEntries, p.value, t);
             }
-    if (P.a.size() > 1) P.a[1].data = pck::buildLoc(locEntries);
+    for (auto& e : locOver) kvSet(locEntries, e.first, e.second);
+    for (auto& k : locDel) {
+        bool keep = false; for (auto& e : locOver) if (e.first == k) keep = true;
+        if (keep) continue;
+        for (size_t i = 0; i < locEntries.size(); i++) if (locEntries[i].first == k) { locEntries.erase(locEntries.begin() + i); break; }
+    }
+    if (P.a.size() > 1 && P.a[1].type == 6) P.a[1].data = pck::buildLoc(locEntries);
 }
 static void markDirty() { P.dirty = true; rebuildLoc(); }
 static void newPkg() {
-    P.a.clear(); P.name.clear(); P.dirty = false; sel = 0;
+    P.a.clear(); P.name.clear(); P.dirty = false; P.type = 8; sel = 0; locBase.clear(); locOver.clear(); locDel.clear(); cfg.little = util::loadConfig().little;
     pck::Asset root; root.name = "0"; root.type = 4; root.props.push_back({"PACKID", std::to_string(1 + rnd() % 0xFFFFFE)});
     pck::Asset loc; loc.name = "localisation.loc"; loc.type = 6;
     P.a.push_back(root); P.a.push_back(loc);
@@ -436,6 +447,49 @@ static void duplicateSkin(int ai) {
     sel = (int)P.a.size() - 1;
     markDirty();
     setStatus("スキンを複製しました (IDを振り直しました)");
+}
+
+static void randomizeId(int ai) {
+    if (ai < 0 || ai >= (int)P.a.size() || !isSkin(P.a[ai])) return;
+    uint32_t id = newUniqueId();
+    if (setSkinId(ai, id)) setStatus("スキンIDをランダムにしました: " + pck::pad8(id));
+}
+static void importSkin(const pck::Asset& s, const std::vector<pck::Asset>& src) {
+    std::string ids = skinIds(s);
+    if (findAsset("dlcskin" + ids + ".png") >= 0 || findAsset("dlccape" + ids + ".png") >= 0) ids = pck::pad8(newUniqueId());
+    pck::Asset n = s;
+    std::string capeOld = getProp(s, "CAPEPATH");
+    applyId(n, ids);
+    if (!capeOld.empty()) {
+        const pck::Asset* c = nullptr;
+        for (auto& x : src) if (x.name == capeOld) c = &x;
+        if (c) { pck::Asset cc = *c; cc.name = "dlccape" + ids + ".png"; setProp(n, "CAPEPATH", cc.name); P.a.push_back(cc); }
+        else delProp(n, "CAPEPATH");
+    }
+    P.a.push_back(n);
+}
+static bool readPck(const std::string& path, std::vector<pck::Asset>& as, uint32_t& type, bool& little) {
+    std::vector<uint8_t> d;
+    if (!util::readFile(path, d)) return false;
+    return pck::parse(d, as, type, little);
+}
+static bool openPck(const std::string& path, const std::string& folder, const std::string& file) {
+    std::vector<pck::Asset> as; uint32_t type = 8; bool little = true;
+    if (!readPck(path, as, type, little)) { setStatus("PCKを読めません (壊れているか対応外の形式)", true); return false; }
+    std::vector<pck::Asset> n;
+    int ri = -1, li = -1;
+    for (size_t i = 0; i < as.size(); i++) { if (ri < 0 && as[i].type == 4) ri = (int)i; if (li < 0 && as[i].type == 6) li = (int)i; }
+    pck::Asset root, loc;
+    if (ri >= 0) root = as[ri]; else { root.name = "0"; root.type = 4; root.props.push_back({"PACKID", std::to_string(1 + rnd() % 0xFFFFFE)}); }
+    if (li >= 0) loc = as[li]; else { loc.name = "localisation.loc"; loc.type = 6; }
+    n.push_back(root); n.push_back(loc);
+    for (size_t i = 0; i < as.size(); i++) if ((int)i != ri && (int)i != li) n.push_back(as[i]);
+    P.a = n; P.type = type; cfg.little = little; P.dirty = false; sel = 0; P.name.clear();
+    locBase.clear(); locOver.clear(); locDel.clear();
+    if (!loc.data.empty() && pck::parseLoc(loc.data, locBase)) for (auto& e : locBase) if (e.first == "IDS_DISPLAY_NAME") P.name = e.second;
+    locEntries = locBase;
+    lastFolder = folder; lastFile = file;
+    return true;
 }
 
 // ---------- UI 状態 ----------
@@ -568,6 +622,104 @@ static bool fitsSkin(const Img& im) { return im.w == 64 && (im.h == 64 || im.h =
 static bool fitsCape(const Img& im) { return im.w == 64 && im.h == 32; }
 static bool anyPng(const Img&) { return true; }
 
+// 一覧から選ぶ (chk を渡すと複数選択: A でチェック / Y で全選択 / X か「決定」で確定)。キャンセルは -1
+static int pickList(const char* title, const std::vector<std::string>& labels, const std::vector<std::string>& subs, std::vector<char>* chk, const std::string& emptyMsg) {
+    int f = 0, scroll = 0, result = -2;
+    const int X = 140, Y = 60, W = 1000, H = 600, RH = 48, LX = X + 20, LY = Y + 60, LW = W - 40, LH = 396;
+    SDL_Rect area{LX, LY, LW, LH};
+    int n = (int)labels.size();
+    while (result == -2) {
+        if (!appletMainLoop()) { running = false; return -1; }
+        Input in; pollInput(in);
+        drawAll();
+        hits.clear();
+        overlay();
+        fill(X - 2, Y - 2, W + 4, H + 4, LINE); fill(X, Y, W, H, SIDE);
+        fill(X, Y, W, 40, BAR); fill(X, Y + 40, W, 1, LINE);
+        text(SZ_M, title, X + 20, Y + 20, WHITE);
+        if (!n) text(SZ_M, emptyMsg, LX, LY + 20, TXT);
+        if (in.dragDy && in.sx >= LX && in.sx < LX + LW && in.sy >= LY && in.sy < LY + LH) scroll -= in.dragDy;
+        scroll = std::max(0, std::min(scroll, std::max(0, n * RH - LH)));
+        SDL_RenderSetClipRect(R, &area);
+        for (int i = 0; i < n; i++) {
+            int ry = LY + i * RH - scroll;
+            if (ry + RH < LY || ry > LY + LH) continue;
+            fill(LX, ry, LW, RH - 4, i == f ? SELBG : BG);
+            if (i == f) fill(LX, ry, 4, RH - 4, GREEN);
+            int tx = LX + 14;
+            if (chk) { text(SZ_M, (*chk)[i] ? "■" : "□", LX + 14, ry + RH / 2 - 2, (*chk)[i] ? YEL : MUTED); tx += 40; }
+            text(SZ_M, clipText(SZ_M, labels[i], 560), tx, ry + RH / 2 - 2, i == f ? YEL : TXT);
+            if (i < (int)subs.size()) text(SZ_S, clipText(SZ_S, subs[i], 300), LX + LW - 10, ry + RH / 2 - 2, MUTED, 2);
+            hitIn(area, LX, ry, LW, RH - 4, [&f, &result, chk, i] { if (chk) { f = i; (*chk)[i] = !(*chk)[i]; } else if (f == i) result = i; else f = i; });
+        }
+        SDL_RenderSetClipRect(R, nullptr);
+        int by = Y + H - 24 - 48;
+        fill(X + W - 20 - 200, by, 200, 48, LINE); text(SZ_M, "キャンセル", X + W - 120, by + 24, WHITE, 1);
+        hit(X + W - 20 - 200, by, 200, 48, [&result] { result = -1; });
+        bool anyChk = false; if (chk) for (char c : *chk) if (c) anyChk = true;
+        bool okEnabled = chk ? anyChk : n > 0;
+        fill(X + W - 40 - 400, by, 200, 48, okEnabled ? GREEN : LINE); text(SZ_M, chk ? "取り込む" : "決定", X + W - 40 - 300, by + 24, WHITE, 1);
+        hit(X + W - 40 - 400, by, 200, 48, [&result, &f, okEnabled, chk] { if (okEnabled) result = chk ? -3 : f; });
+        text(SZ_S, chk ? "↑↓:移動  A:チェック  Y:全選択/解除  X:取り込む  B:キャンセル" : "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
+        if (in.tap) dispatchTap(in.tx, in.ty);
+        if (n && (in.down & HidNpadButton_Up)) f = (f + n - 1) % n;
+        if (n && (in.down & HidNpadButton_Down)) f = (f + 1) % n;
+        if (n) { int pos = f * RH; if (pos < scroll) scroll = pos; else if (pos + RH > scroll + LH) scroll = pos + RH - LH; }
+        if (n && (in.down & HidNpadButton_A)) { if (chk) (*chk)[f] = !(*chk)[f]; else result = f; }
+        if (chk && (in.down & HidNpadButton_Y)) { bool all = true; for (char c : *chk) if (!c) all = false; for (auto& c : *chk) c = !all; }
+        if (chk && (in.down & HidNpadButton_X) && anyChk) result = -3;
+        if (in.down & HidNpadButton_B) result = -1;
+        SDL_RenderPresent(R);
+    }
+    if (chk) return result == -3 ? 0 : -1;
+    return result >= 0 && result < n ? result : -1;
+}
+
+struct PckFile { std::string path, label; size_t size = 0; };
+static void scanPckDir(const std::string& dir, const std::string& prefix, std::vector<PckFile>& v) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    while (dirent* e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n.size() < 5) continue;
+        std::string ext = n.substr(n.size() - 4); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+        if (ext != ".pck") continue;
+        PckFile f; f.path = dir + n; f.label = prefix + n;
+        struct stat st; if (stat(f.path.c_str(), &st) == 0) f.size = (size_t)st.st_size;
+        v.push_back(f);
+    }
+    closedir(d);
+}
+static std::vector<PckFile> scanPcks() {  // sd:/switch/nxpckstudio/pck/ と DLC フォルダー(1階層下)
+    std::vector<PckFile> v;
+    scanPckDir(std::string(util::BASE) + "pck/", "", v);
+    std::string root = util::dlcRoot();
+    if (DIR* d = opendir(root.c_str())) {
+        std::vector<std::string> subs;
+        while (dirent* e = readdir(d)) { std::string n = e->d_name; if (n != "." && n != "..") subs.push_back(n); }
+        closedir(d);
+        for (auto& s : subs) scanPckDir(root + s + "/", s + "/", v);
+    }
+    std::sort(v.begin(), v.end(), [](const PckFile& a, const PckFile& b) { return a.label < b.label; });
+    return v;
+}
+// PCKを1つ選ぶ。選んだら true
+static bool pickPck(const char* title, PckFile& out) {
+    std::vector<PckFile> fs = scanPcks();
+    std::vector<std::string> labels, subs;
+    for (auto& f : fs) { labels.push_back(f.label); subs.push_back(std::to_string(f.size / 1024) + " KB"); }
+    int i = pickList(title, labels, subs, nullptr, "PCKがありません。sd:/switch/nxpckstudio/pck/ に .pck を入れてください");
+    if (i < 0) return false;
+    out = fs[i];
+    return true;
+}
+static void splitLabel(const PckFile& f, std::string& folder, std::string& file) {
+    size_t sl = f.label.find('/');
+    folder = sl == std::string::npos ? "" : f.label.substr(0, sl);
+    file = f.label.substr(sl == std::string::npos ? 0 : sl + 1);
+    if (file.size() > 4) file = file.substr(0, file.size() - 4);
+}
+
 // ---------- 操作 (メニュー / 詳細から呼ぶ) ----------
 static void actAddSkin() {
     Img im;
@@ -593,25 +745,93 @@ static void actSave() {
     std::string dir = util::dlcRoot() + folder + "/", path = dir + file + ".pck";
     struct stat st;
     if (stat(path.c_str(), &st) == 0 && dialog("上書き確認", "このファイルは既にあります。上書きしますか?\n" + folder + "/" + file + ".pck", {"上書き", "やめる"}, 1) != 0) return;
-    rebuildLoc();
-    std::vector<uint8_t> out = pck::build(P.a, 8, cfg.little);
+    if (P.dirty) rebuildLoc();
+    std::vector<uint8_t> out = pck::build(P.a, P.type, cfg.little);
     util::mkdirs(dir);
     if (!util::writeAtomic(path, out)) { setStatus("書き込みに失敗しました (SDの空き容量を確認)", true); dialog("保存失敗", "書き込みに失敗しました。\nSDカードの空き容量を確認してください。", {"OK"}, 0); return; }
     lastFolder = folder; lastFile = file; P.dirty = false;
     setStatus("配置しました: " + folder + "/" + file + ".pck");
     dialog("配置しました", hint + folder + "/" + file + ".pck\n\nゲームを再起動してください。", {"OK"}, 0);
 }
-static void actNew() {
-    if (P.dirty && dialog("新規", "保存していない内容は破棄されます。続けますか?", {"新規作成", "やめる"}, 1) != 0) return;
-    newPkg(); detFocus = detScroll = listScroll = 0; lastFolder.clear(); lastFile.clear();
-    setStatus("新しいパッケージを作りました");
-}
 static void actQuit() {
     if (!P.dirty || dialog("終了", "保存していない変更があります。終了しますか?", {"終了", "やめる"}, 1) == 0) running = false;
 }
+static void actHome() {
+    if (P.dirty && dialog("ホームに戻る", "保存していない内容は破棄されます。戻りますか?", {"戻る", "やめる"}, 1) != 0) return;
+    P.dirty = false; home = true; homeFocus = 0; pane = LIST;
+}
+static void actCreatePack() {
+    std::string name;
+    if (!keyboard("スキンパックの名前", "", name, 30) || name.empty()) return;
+    newPkg(); P.name = name; rebuildLoc();
+    lastFolder.clear(); lastFile.clear(); detFocus = detScroll = listScroll = 0; pane = LIST; home = false;
+    setStatus("パックを作りました: " + name);
+    actAddSkin();  // そのまま最初のスキンを選ばせる
+}
+static void actOpenPck() {
+    PckFile f;
+    if (!pickPck("開くPCKを選ぶ", f)) return;
+    std::string folder, file; splitLabel(f, folder, file);
+    if (!openPck(f.path, folder, file)) { dialog("開けません", "このPCKを読み込めませんでした。\n壊れているか、対応していない形式です。", {"OK"}, 0); return; }
+    detFocus = detScroll = listScroll = 0; pane = LIST; home = false;
+    setStatus("開きました: " + f.label);
+}
+static void actImport() {
+    PckFile f;
+    if (!pickPck("取り込み元のPCKを選ぶ", f)) return;
+    std::vector<pck::Asset> src; uint32_t ty; bool le;
+    if (!readPck(f.path, src, ty, le)) { dialog("開けません", "このPCKを読み込めませんでした。", {"OK"}, 0); return; }
+    std::vector<int> idx; std::vector<std::string> labels, subs;
+    for (size_t i = 0; i < src.size(); i++) if (isSkin(src[i])) {
+        idx.push_back((int)i);
+        std::string nm = getProp(src[i], "DISPLAYNAME");
+        labels.push_back(nm.empty() ? src[i].name : nm);
+        subs.push_back(skinIds(src[i]) + (getProp(src[i], "CAPEPATH").empty() ? "" : "  +マント"));
+    }
+    std::vector<char> chk(idx.size(), 0);
+    if (pickList("取り込むスキンを選ぶ", labels, subs, &chk, "このPCKにスキンがありません") < 0) return;
+    int cnt = 0;
+    for (size_t k = 0; k < idx.size(); k++) if (chk[k]) { importSkin(src[idx[k]], src); cnt++; }
+    if (cnt) { sel = (int)P.a.size() - 1; markDirty(); setStatus(std::to_string(cnt) + " 個のスキンを取り込みました"); }
+}
+static void actRandAll() {
+    std::vector<int> ids; for (size_t i = 0; i < P.a.size(); i++) if (isSkin(P.a[i])) ids.push_back((int)i);
+    if (ids.empty()) { setStatus("スキンがありません", true); return; }
+    if (dialog("全スキンIDをランダム化", std::to_string(ids.size()) + " 個のスキンのIDを新しく振り直します。よろしいですか?", {"振り直す", "やめる"}, 1) != 0) return;
+    for (int i : ids) { uint32_t id = newUniqueId(); setSkinId(i, id); }
+    setStatus(std::to_string(ids.size()) + " 個のスキンIDをランダムにしました");
+}
+static void actCopyProps(int ai) {
+    PckFile f;
+    if (!pickPck("プロパティのコピー元PCKを選ぶ", f)) return;
+    std::vector<pck::Asset> src; uint32_t ty; bool le;
+    if (!readPck(f.path, src, ty, le)) { dialog("開けません", "このPCKを読み込めませんでした。", {"OK"}, 0); return; }
+    std::vector<int> idx; std::vector<std::string> labels, subs;
+    for (size_t i = 0; i < src.size(); i++) if (isSkin(src[i])) {
+        idx.push_back((int)i);
+        std::string nm = getProp(src[i], "DISPLAYNAME");
+        labels.push_back(nm.empty() ? src[i].name : nm);
+        subs.push_back(std::to_string(src[i].props.size()) + " 個のプロパティ");
+    }
+    int k = pickList("コピー元のスキンを選ぶ", labels, subs, nullptr, "このPCKにスキンがありません");
+    if (k < 0 || ai >= (int)P.a.size()) return;
+    static const char* SKIP[] = {"DISPLAYNAME", "DISPLAYNAMEID", "THEMENAME", "THEMENAMEID", "CAPEPATH"};
+    int cnt = 0;
+    for (auto& p : src[idx[k]].props) {
+        bool skip = false; for (auto s : SKIP) if (p.key == s) skip = true;
+        if (skip) continue;
+        if (p.key == "BOX" || p.key == "OFFSET") { P.a[ai].props.push_back(p); cnt++; }  // 複数持てるキーは追加
+        else { setProp(P.a[ai], p.key, p.value); cnt++; }
+    }
+    markDirty();
+    setStatus(std::to_string(cnt) + " 個のプロパティをコピーしました (名前・テーマ・マントは除く)");
+}
+static const char* HOME_L[3] = {"スキンパックを作成", "既存のPCKを開く", "終了"};
+static const char* HOME_S[3] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "アプリを終了します"};
+static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else actQuit(); }
 struct MenuItem { const char* label; void (*fn)(); };
-static const MenuItem MENUS[] = {{"新規", actNew}, {"スキン追加", actAddSkin}, {"保存して配置", actSave}, {"終了", actQuit}};
-static const int NMENU = 4;
+static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"終了", actQuit}};
+static const int NMENU = 6;
 
 // ---------- 詳細ペインの行 ----------
 struct Row {
@@ -644,7 +864,8 @@ static std::vector<Row> buildRows() {
     if (isSkin(a)) {
         field("名前", getProp(a, "DISPLAYNAME"), [ai] { editText(ai, "スキン名", getProp(P.a[ai], "DISPLAYNAME"), 30, [ai](const std::string& v) { if (!v.empty()) { setProp(P.a[ai], "DISPLAYNAME", v); markDirty(); } }); });
         field("テーマ名", getProp(a, "THEMENAME"), [ai] { editText(ai, "テーマ名 (空で削除)", getProp(P.a[ai], "THEMENAME"), 30, [ai](const std::string& v) { setTheme(P.a[ai], v); markDirty(); }); });
-        field("スキンID", skinIds(a), [ai] { editText(ai, "スキンID (100000〜99999998)", skinIds(P.a[ai]), 8, [ai](const std::string& v) { setSkinId(ai, (uint32_t)strtoul(v.c_str(), nullptr, 10)); }, true); });
+        field("スキンID", skinIds(a), [ai] { editText(ai, "スキンID (100000〜99999998)", skinIds(P.a[ai]), 8, [ai](const std::string& v) { setSkinId(ai, (uint32_t)strtoul(v.c_str(), nullptr, 10)); }, true); })->onX = [ai] { randomizeId(ai); };
+        { Row b; b.k = Row::BTN; b.label = "IDをランダムにする"; b.onA = [ai] { randomizeId(ai); }; rows.push_back(b); }
         bool slim = getProp(a, "ANIM") == "0x00080000";
         auto tg = [ai] { pck::Asset& s = P.a[ai]; setProp(s, "ANIM", getProp(s, "ANIM") == "0x00080000" ? "0x00040000" : "0x00080000"); markDirty(); };
         field("モデル", slim ? "スリム (Alex)" : "クラシック (Steve)", tg)->onLR = tg;
@@ -673,8 +894,31 @@ static std::vector<Row> buildRows() {
         };
         rows.push_back(add);
     } else {
-        Row t; t.k = Row::TITLE; t.label = "ローカライズは「名前」「テーマ名」「パック名」から自動で作られます"; rows.push_back(t);
+        Row t; t.k = Row::TITLE; t.label = "ローカライズ (" + std::to_string(locEntries.size()) + ")  A:値を編集  Y:削除"; rows.push_back(t);
+        for (size_t li = 0; li < locEntries.size(); li++) {
+            std::string key = locEntries[li].first;
+            Row r; r.k = Row::PROP; r.label = key; r.value = locEntries[li].second;
+            r.onA = [key] {
+                std::string cur; for (auto& e : locEntries) if (e.first == key) cur = e.second;
+                std::string v; if (keyboard("文字列 (全言語共通)", cur, v, 120)) { kvSet(locOver, key, v); markDirty(); }
+            };
+            r.onY = [key] {
+                for (size_t i = 0; i < locOver.size(); i++) if (locOver[i].first == key) { locOver.erase(locOver.begin() + i); break; }
+                locDel.push_back(key); markDirty(); setStatus("エントリを削除しました: " + key);
+            };
+            rows.push_back(r);
+        }
+        Row add; add.k = Row::BTN; add.label = "＋ エントリを追加";
+        add.onA = [] {
+            std::string k, v;
+            if (!keyboard("キー (例: IDS_xxx)", "", k, 60) || k.empty()) return;
+            if (!keyboard("文字列", "", v, 120)) return;
+            for (size_t i = 0; i < locDel.size(); i++) if (locDel[i] == k) { locDel.erase(locDel.begin() + i); break; }
+            kvSet(locOver, k, v); markDirty();
+        };
+        rows.push_back(add);
     }
+    if (isSkin(a)) { Row c; c.k = Row::BTN; c.label = "プロパティをコピー..."; c.onA = [ai] { actCopyProps(ai); }; rows.push_back(c); }
     if (isSkin(a)) { Row d; d.k = Row::BTN; d.label = "スキンを複製"; d.onA = [ai] { duplicateSkin(ai); }; rows.push_back(d); }
     if (ai >= 2) {
         Row d; d.k = Row::BTN_DANGER; d.label = "アセットを削除";
@@ -712,6 +956,7 @@ static void drawInfoBar() {
     x += badge(x, cy, "パック: " + clipText(SZ_S, packNameEff(), 260));
     x += badge(x, cy, "アセット: " + std::to_string(P.a.size()));
     x += badge(x, cy, cfg.little ? "LE (Switch)" : "BE");
+    if (P.dirty) x += badge(x, cy, "● 未保存");
     std::string dst = "出力: NX/DLC/" + (lastFolder.empty() ? std::string("<フォルダー名>") : lastFolder) + "/" + (lastFile.empty() ? std::string("<ファイル名>") : lastFile) + ".pck";
     text(SZ_S, clipText(SZ_S, dst, 1280 - x - 20), 1266, cy, WHITE, 2);
 }
@@ -748,9 +993,13 @@ static void drawSidebar() {
     SDL_RenderSetClipRect(R, nullptr);
     int by = FOOT_Y - ACT_H;
     fill(0, by, SB_W - 1, ACT_H, SIDE); fill(0, by, SB_W - 1, 1, LINE);
-    fill(12, by + 8, SB_W - 25, ACT_H - 16, GREEN);
-    text(SZ_M, "＋ スキンを追加", SB_W / 2, by + ACT_H / 2, WHITE, 1);
-    hit(12, by + 8, SB_W - 25, ACT_H - 16, [] { actAddSkin(); });
+    int bw = (SB_W - 1 - 12 * 3) / 2;
+    fill(12, by + 8, bw, ACT_H - 16, GREEN);
+    text(SZ_S, "＋ スキン追加", 12 + bw / 2, by + ACT_H / 2, WHITE, 1);
+    hit(12, by + 8, bw, ACT_H - 16, [] { actAddSkin(); });
+    fill(24 + bw, by + 8, bw, ACT_H - 16, BLUE);
+    text(SZ_S, "保存して配置", 24 + bw + bw / 2, by + ACT_H / 2, WHITE, 1);
+    hit(24 + bw, by + 8, bw, ACT_H - 16, [] { actSave(); });
 }
 
 static void drawPreview() {
@@ -865,16 +1114,39 @@ static void drawDetails() {
 
 static void drawFooter() {
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
-    const char* hint = pane == LIST ? "↑↓:選択  A/→:詳細  X:スキン追加  L:メニュー  +:終了"
-                     : pane == DETAIL ? "↑↓:選択  A:編集  X:キー編集/マント解除  Y:削除  B/←:一覧  L:メニュー"
+    const char* hint = pane == LIST ? "↑↓:選択  A/→:詳細  X:スキン追加  Y:ID再抽選  L:メニュー  +:終了"
+                     : pane == DETAIL ? "↑↓:選択  A:編集/実行  X:キー編集・ID再抽選・マント解除  Y:削除  B/←:一覧"
                                       : "←→:選択  A:実行  B/L:戻る";
     int hw = textW(SZ_S, hint);
     text(SZ_S, hint, 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
     text(SZ_S, clipText(SZ_S, status, 1280 - hw - 50), 12, FOOT_Y + FOOT_H / 2, statusColor);
 }
 
+static void drawHome() {
+    fill(0, 0, 1280, 720, BG);
+    fill(0, 0, 1280, MENU_H, BAR); fill(0, MENU_H - 1, 1280, 1, LINE);
+    text(SZ_M, "NX PCK STUDIO", 18, MENU_H / 2 - 1, YEL);
+    text(SZ_S, APP_VER, 1262, MENU_H / 2, MUTED, 2);
+    text(SZ_L, "NX PCK STUDIO", 640, 120, YEL, 1);
+    text(SZ_S, "Minecraft スキンパック作成ツール", 640, 170, MUTED, 1);
+    for (int i = 0; i < 3; i++) {
+        int bx = 360, by = 215 + i * 125, bw = 560, bh = 105;
+        bool f = homeFocus == i;
+        C col = i == 0 ? (f ? GREEN_HI : GREEN) : (f ? HOVER : LINE);
+        fill(bx, by, bw, bh, col);
+        if (f) outline(bx - 4, by - 4, bw + 8, bh + 8, YEL, 3);
+        text(SZ_L, HOME_L[i], bx + bw / 2, by + 38, WHITE, 1);
+        text(SZ_S, HOME_S[i], bx + bw / 2, by + 78, i == 0 ? WHITE : MUTED, 1);
+        hit(bx, by, bw, bh, [i] { homeFocus = i; homeAct(i); });
+    }
+    fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
+    text(SZ_S, "↑↓:選択  A:決定  +:終了", 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
+    text(SZ_S, clipText(SZ_S, status, 900), 12, FOOT_Y + FOOT_H / 2, statusColor);
+}
+
 static void drawAll() {
     hits.clear();
+    if (home) { drawHome(); return; }
     fill(0, 0, 1280, 720, BG);
     drawSidebar(); drawPreview(); drawDetails(); drawMenuBar(); drawInfoBar(); drawFooter();
 }
@@ -883,6 +1155,14 @@ static void drawAll() {
 static void handleInput(const Input& in) {
     if (in.tap) dispatchTap(in.tx, in.ty);
     if (!running) return;
+    if (home) {
+        uint64_t hd = in.down;
+        if (hd & HidNpadButton_Plus) { actQuit(); return; }
+        if (hd & HidNpadButton_Up) homeFocus = (homeFocus + 2) % 3;
+        if (hd & HidNpadButton_Down) homeFocus = (homeFocus + 1) % 3;
+        if (hd & HidNpadButton_A) homeAct(homeFocus);
+        return;
+    }
     bool inPv = in.sx >= PV3D.x && in.sx < PV3D.x + PV3D.w && in.sy >= PV3D.y && in.sy < PV3D.y + PV3D.h;
     if (inPv && (in.dragDx || in.dragDy)) { yaw3d -= in.dragDx * 0.012f; pitch3d = std::max(-1.2f, std::min(1.2f, pitch3d + in.dragDy * 0.008f)); autoRot = false; }
     if (std::abs(in.stx) > 6000) { yaw3d += in.stx / 32767.f * 0.05f; autoRot = false; }
@@ -912,6 +1192,7 @@ static void handleInput(const Input& in) {
         if (up || down) ensureVisible(listScroll, sel * LIST_ROW, LIST_ROW, LIST_RECT.h);
         if (right || a) { pane = DETAIL; detFocus = firstFocusable(buildRows()); detScroll = 0; }
         if (x) actAddSkin();
+        if (y && n && isSkin(P.a[sel])) randomizeId(sel);
     } else {
         std::vector<Row> rows = buildRows();
         int rn = (int)rows.size();
@@ -951,6 +1232,7 @@ int main() {
 
     util::mkdirs(util::BASE);
     util::mkdirs(imgDir());
+    util::mkdirs(std::string(util::BASE) + "pck/");
     cfg = util::loadConfig();
     newPkg();
     if (scanImages().empty()) {  // 初回: サンプルのスキン/マントを画像フォルダーに入れる
