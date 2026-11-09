@@ -4,6 +4,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_mixer.h>
 #include <dirent.h>
 #include <algorithm>
 #include <cstdlib>
@@ -197,6 +198,20 @@ static void pollInput(Input& in) {
     padUpdate(&pad);
     in = Input();
     in.down = padGetButtonsDown(&pad);
+    {   // 十字キー + 左スティック → 長押しでリピート (一覧やダイアログを素早く動かせる)
+        const uint64_t DIRS = HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right;
+        HidAnalogStickState ls = padGetStickPos(&pad, 0);
+        uint64_t cur = padGetButtons(&pad) & DIRS;
+        if (abs(ls.x) > 14000 || abs(ls.y) > 14000) {
+            if (abs(ls.x) > abs(ls.y)) cur |= ls.x < 0 ? HidNpadButton_Left : HidNpadButton_Right;
+            else cur |= ls.y > 0 ? HidNpadButton_Up : HidNpadButton_Down;
+        }
+        static uint64_t prev = 0; static int hold = 0;
+        uint64_t fire = cur & ~prev;
+        if (cur && cur == prev) { hold++; if (hold >= 22 && (hold - 22) % 5 == 0) fire |= cur; } else hold = 0;
+        prev = cur;
+        in.down = (in.down & ~DIRS) | fire;
+    }
     static bool touching = false, dragged = false;
     static int sx = 0, sy = 0, lx = 0, ly = 0;
     HidTouchScreenState ts = {0};
@@ -249,14 +264,16 @@ static void drawTex(SDL_Texture* t, uint32_t w, uint32_t h, int x, int y, int bw
         for (int xx = 0; xx < d.w; xx += 16) fill(d.x + xx, d.y + yy, std::min(16, d.w - xx), std::min(16, d.h - yy), ((xx + yy) / 16) % 2 ? C{0x3a, 0x3a, 0x3a} : C{0x30, 0x30, 0x30});
     SDL_RenderCopy(R, t, nullptr, &d);
 }
-static std::string imgDir() { return std::string(util::BASE) + "images/"; }
-static std::vector<Img> scanImages() {
+static std::string imgDir() { return std::string(util::BASE) + "images/"; }   // 旧フォルダー (起動時に skins/ capes/ へ移す)
+static std::string skinDir() { return std::string(util::BASE) + "skins/"; }
+static std::string capeDir() { return std::string(util::BASE) + "capes/"; }
+static std::vector<Img> scanImages(const std::string& dir) {
     std::vector<Img> v;
-    if (DIR* d = opendir(imgDir().c_str())) {
+    if (DIR* d = opendir(dir.c_str())) {
         while (dirent* e = readdir(d)) {
             std::string n = e->d_name;
             if (!util::isPng(n)) continue;
-            Img im; im.name = n; im.path = imgDir() + n;
+            Img im; im.name = n; im.path = dir + n;
             std::vector<uint8_t> data;
             if (!util::readFile(im.path, data) || !pck::pngSize(data, im.w, im.h)) continue;
             im.size = data.size();
@@ -273,6 +290,80 @@ static util::Config cfg;
 static std::string status = "";
 static C statusColor = YEL;
 static void setStatus(const std::string& s, bool bad = false) { status = s; statusColor = bad ? RED_HI : YEL; }
+
+// 旧 images/ の PNG を skins/ capes/ に振り分ける (名前に cape が入っていればマント)
+static int migrateImages() {
+    std::vector<std::string> names;
+    if (DIR* d = opendir(imgDir().c_str())) {
+        while (dirent* e = readdir(d)) { std::string n = e->d_name; if (util::isPng(n)) names.push_back(n); }
+        closedir(d);
+    }
+    int moved = 0;
+    for (auto& n : names) {
+        std::string low = n; for (auto& c : low) c = (char)tolower((unsigned char)c);
+        std::string dst = (low.find("cape") != std::string::npos ? capeDir() : skinDir()) + n;
+        struct stat st;
+        if (stat(dst.c_str(), &st) == 0) continue;
+        if (rename((imgDir() + n).c_str(), dst.c_str()) == 0) moved++;
+    }
+    return moved;
+}
+
+// ---------- BGM (SDL2_mixer: mp3 / wav / ogg) ----------
+// sd:/switch/nxpckstudio/bgm/ に曲を入れるとその順に流れ続けます。無ければ内蔵の曲(romfs:/bgm.wav)。
+static std::vector<std::string> bgmList;
+static int bgmIdx = -1;
+static Mix_Music* bgmMus = nullptr;
+static bool bgmReady = false;
+static volatile bool bgmDone = false;
+static void bgmFinished() { bgmDone = true; }  // 音声スレッドから呼ばれるのでフラグだけ立てる
+static std::string bgmName() {
+    if (bgmIdx < 0 || bgmIdx >= (int)bgmList.size()) return "";
+    const std::string& s = bgmList[bgmIdx]; size_t sl = s.rfind('/');
+    return sl == std::string::npos ? s : s.substr(sl + 1);
+}
+static void bgmNext() {
+    if (!bgmReady || bgmList.empty()) return;
+    if (bgmMus) { Mix_FreeMusic(bgmMus); bgmMus = nullptr; }
+    for (size_t k = 0; k < bgmList.size(); k++) {
+        bgmIdx = (bgmIdx + 1) % (int)bgmList.size();
+        bgmMus = Mix_LoadMUS(bgmList[bgmIdx].c_str());
+        if (bgmMus && Mix_PlayMusic(bgmMus, 1) == 0) return;
+        if (bgmMus) { Mix_FreeMusic(bgmMus); bgmMus = nullptr; }
+    }
+}
+static void bgmInit() {
+    if (!cfg.bgm) return;
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) != 0) return;
+    Mix_Init(MIX_INIT_MP3 | MIX_INIT_OGG);
+    bgmReady = true;
+    Mix_VolumeMusic(40);
+    Mix_HookMusicFinished(bgmFinished);
+    std::string dir = std::string(util::BASE) + "bgm/";
+    if (DIR* d = opendir(dir.c_str())) {
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name, low = n; for (auto& c : low) c = (char)tolower((unsigned char)c);
+            auto ends = [&](const char* x) { size_t l = strlen(x); return low.size() > l && low.compare(low.size() - l, l, x) == 0; };
+            if (ends(".mp3") || ends(".wav") || ends(".ogg")) bgmList.push_back(dir + n);
+        }
+        closedir(d);
+    }
+    std::sort(bgmList.begin(), bgmList.end());
+    if (bgmList.empty()) bgmList.push_back("romfs:/bgm.wav");
+    bgmNext();
+}
+static void bgmQuit() {
+    if (!bgmReady) return;
+    Mix_HookMusicFinished(nullptr);
+    Mix_HaltMusic();
+    if (bgmMus) { Mix_FreeMusic(bgmMus); bgmMus = nullptr; }
+    Mix_CloseAudio(); Mix_Quit();
+}
+static void actBgm() {
+    if (!bgmReady || !bgmMus) { setStatus("BGMを使えません (config.ini の bgm=off か、曲を読めません)", true); return; }
+    if (Mix_PausedMusic()) { Mix_ResumeMusic(); setStatus("BGM オン: " + bgmName()); }
+    else { Mix_PauseMusic(); setStatus("BGM オフ"); }
+}
 
 struct Pkg { std::vector<pck::Asset> a; std::string name; bool dirty = false; uint32_t type = 8; } P;
 typedef std::vector<std::pair<std::string, std::string>> KV;
@@ -561,10 +652,10 @@ static int dialog(const std::string& title, const std::string& msg, std::vector<
 }
 
 // 画像選択ダイアログ
-static bool pickImage(const char* title, std::function<bool(const Img&)> ok, Img& out) {
+static bool pickImage(const char* title, const std::string& dir, std::function<bool(const Img&)> ok, Img& out) {
     clearImgCache();
     std::vector<Img> list;
-    for (auto& im : scanImages()) if (ok(im)) list.push_back(im);
+    for (auto& im : scanImages(dir)) if (ok(im)) list.push_back(im);
     int f = 0, scroll = 0, result = -2;
     const int X = 90, Y = 60, W = 1100, H = 600, RH = 44, LX = X + 20, LY = Y + 60, LW = 600, LH = 396;
     SDL_Rect area{LX, LY, LW, LH};
@@ -580,7 +671,7 @@ static bool pickImage(const char* title, std::function<bool(const Img&)> ok, Img
         int n = (int)list.size();
         if (!n) {
             text(SZ_M, "該当する画像がありません", LX, LY + 20, TXT);
-            text(SZ_S, "sd:/switch/nxpckstudio/images/ に PNG を入れてください", LX, LY + 60, MUTED);
+            text(SZ_S, "sd:/" + dir.substr(6) + " に PNG を入れてください", LX, LY + 60, MUTED);
         }
         if (in.dragDy && in.sx >= LX && in.sx < LX + LW && in.sy >= LY && in.sy < LY + LH) scroll -= in.dragDy;
         scroll = std::max(0, std::min(scroll, std::max(0, n * RH - LH)));
@@ -723,7 +814,7 @@ static void splitLabel(const PckFile& f, std::string& folder, std::string& file)
 // ---------- 操作 (メニュー / 詳細から呼ぶ) ----------
 static void actAddSkin() {
     Img im;
-    if (!pickImage("スキン画像を選ぶ (64x64 / 64x32)", fitsSkin, im)) return;
+    if (!pickImage("スキン画像を選ぶ (64x64 / 64x32)", skinDir(), fitsSkin, im)) return;
     std::string base = im.name.substr(0, im.name.size() - 4), name;
     if (!keyboard("スキン名", base, name, 30) || name.empty()) return;
     addSkin(im, name);
@@ -830,8 +921,8 @@ static const char* HOME_L[3] = {"スキンパックを作成", "既存のPCKを�
 static const char* HOME_S[3] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "アプリを終了します"};
 static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else actQuit(); }
 struct MenuItem { const char* label; void (*fn)(); };
-static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"終了", actQuit}};
-static const int NMENU = 6;
+static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"終了", actQuit}};
+static const int NMENU = 7;
 
 // ---------- 詳細ペインの行 ----------
 struct Row {
@@ -869,12 +960,12 @@ static std::vector<Row> buildRows() {
         bool slim = getProp(a, "ANIM") == "0x00080000";
         auto tg = [ai] { pck::Asset& s = P.a[ai]; setProp(s, "ANIM", getProp(s, "ANIM") == "0x00080000" ? "0x00040000" : "0x00080000"); markDirty(); };
         field("モデル", slim ? "スリム (Alex)" : "クラシック (Steve)", tg)->onLR = tg;
-        field("スキン画像", "置き換える...", [ai] { Img im; if (pickImage("スキン画像を選ぶ (64x64 / 64x32)", fitsSkin, im)) replaceData(ai, im); });
+        field("スキン画像", "置き換える...", [ai] { Img im; if (pickImage("スキン画像を選ぶ (64x64 / 64x32)", skinDir(), fitsSkin, im)) replaceData(ai, im); });
         std::string cp = getProp(a, "CAPEPATH");
-        Row* r = field("マント", cp.empty() ? "なし (Aで選ぶ)" : cp, [ai] { Img im; if (pickImage("マント画像を選ぶ (64x32)", fitsCape, im)) { int ni = setCape(ai, im); sel = ni; } });
+        Row* r = field("マント", cp.empty() ? "なし (Aで選ぶ)" : cp, [ai] { Img im; if (pickImage("マント画像を選ぶ (64x32)", capeDir(), fitsCape, im)) { int ni = setCape(ai, im); sel = ni; } });
         r->onX = [ai] { if (!getProp(P.a[ai], "CAPEPATH").empty()) removeCape(ai); };
     } else if (isPng(a)) {
-        field("画像", "置き換える...", [ai] { Img im; if (pickImage("画像を選ぶ", anyPng, im)) replaceData(ai, im); });
+        field("画像", "置き換える...", [ai] { Img im; if (pickImage("画像を選ぶ", isCape(P.a[ai]) ? capeDir() : skinDir(), anyPng, im)) replaceData(ai, im); });
     }
     if (a.type != 6) {
         Row t; t.k = Row::TITLE; t.label = "プロパティ (" + std::to_string(a.props.size()) + ")"; rows.push_back(t);
@@ -995,10 +1086,10 @@ static void drawSidebar() {
     fill(0, by, SB_W - 1, ACT_H, SIDE); fill(0, by, SB_W - 1, 1, LINE);
     int bw = (SB_W - 1 - 12 * 3) / 2;
     fill(12, by + 8, bw, ACT_H - 16, GREEN);
-    text(SZ_S, "＋ スキン追加", 12 + bw / 2, by + ACT_H / 2, WHITE, 1);
+    text(SZ_S, "X ＋スキン追加", 12 + bw / 2, by + ACT_H / 2, WHITE, 1);
     hit(12, by + 8, bw, ACT_H - 16, [] { actAddSkin(); });
     fill(24 + bw, by + 8, bw, ACT_H - 16, BLUE);
-    text(SZ_S, "保存して配置", 24 + bw + bw / 2, by + ACT_H / 2, WHITE, 1);
+    text(SZ_S, "－ 保存して配置", 24 + bw + bw / 2, by + ACT_H / 2, WHITE, 1);
     hit(24 + bw, by + 8, bw, ACT_H - 16, [] { actSave(); });
 }
 
@@ -1114,8 +1205,8 @@ static void drawDetails() {
 
 static void drawFooter() {
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
-    const char* hint = pane == LIST ? "↑↓:選択  A/→:詳細  X:スキン追加  Y:ID再抽選  L:メニュー  +:終了"
-                     : pane == DETAIL ? "↑↓:選択  A:編集/実行  X:キー編集・ID再抽選・マント解除  Y:削除  B/←:一覧"
+    const char* hint = pane == LIST ? "↑↓:選択  A:詳細  X:追加  −:保存  Y:ID再抽選  L:メニュー  +:終了"
+                     : pane == DETAIL ? "↑↓:選択  A:編集  X:ID再抽選/キー編集  Y:削除  −:保存  B:一覧"
                                       : "←→:選択  A:実行  B/L:戻る";
     int hw = textW(SZ_S, hint);
     text(SZ_S, hint, 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
@@ -1179,6 +1270,7 @@ static void handleInput(const Input& in) {
     bool up = d & HidNpadButton_Up, down = d & HidNpadButton_Down, left = d & HidNpadButton_Left, right = d & HidNpadButton_Right;
     bool a = d & HidNpadButton_A, b = d & HidNpadButton_B, x = d & HidNpadButton_X, y = d & HidNpadButton_Y;
     if (d & HidNpadButton_Plus) { actQuit(); return; }
+    if (d & HidNpadButton_Minus) { actSave(); return; }
     if (d & HidNpadButton_L) { if (pane == MENU) pane = prevPane; else { prevPane = pane; pane = MENU; } return; }
     int n = (int)P.a.size();
     if (pane == MENU) {
@@ -1217,7 +1309,7 @@ static void handleInput(const Input& in) {
 int main() {
     romfsInit();
     plInitialize(PlServiceType_User);
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     IMG_Init(IMG_INIT_PNG);
     TTF_Init();
@@ -1231,21 +1323,27 @@ int main() {
     hidInitializeTouchScreen();
 
     util::mkdirs(util::BASE);
-    util::mkdirs(imgDir());
+    util::mkdirs(skinDir());
+    util::mkdirs(capeDir());
     util::mkdirs(std::string(util::BASE) + "pck/");
+    util::mkdirs(std::string(util::BASE) + "bgm/");
     cfg = util::loadConfig();
     newPkg();
-    if (scanImages().empty()) {  // 初回: サンプルのスキン/マントを画像フォルダーに入れる
+    int moved = migrateImages();
+    if (scanImages(skinDir()).empty() && scanImages(capeDir()).empty()) {  // 初回: サンプルのスキン/マントを入れる
         for (const char* n : {"sample_skin.png", "sample_cape.png"}) {
             std::vector<uint8_t> d;
-            if (util::readFile(std::string("romfs:/samples/") + n, d)) util::writeAtomic(imgDir() + n, d);
+            if (util::readFile(std::string("romfs:/samples/") + n, d)) util::writeAtomic((std::string(n) == "sample_cape.png" ? capeDir() : skinDir()) + n, d);
         }
-        setStatus("サンプル画像を画像フォルダーに入れました");
-    } else setStatus("「スキン追加」から画像を選んでください");
+        setStatus("サンプル画像を skins/ と capes/ に入れました");
+    } else if (moved) setStatus(std::to_string(moved) + " 個の画像を skins/ と capes/ に振り分けました");
+    else setStatus("「スキンパックを作成」から始めましょう");
+    bgmInit();
 
     while (running && appletMainLoop()) {
         Input in;
         pollInput(in);
+        if (bgmDone) { bgmDone = false; bgmNext(); }
         handleInput(in);
         drawAll();
         SDL_RenderPresent(R);
@@ -1260,6 +1358,7 @@ int main() {
     closeFonts();
     SDL_DestroyRenderer(R);
     SDL_DestroyWindow(win);
+    bgmQuit();
     TTF_Quit(); IMG_Quit(); SDL_Quit();
     plExit();
     romfsExit();

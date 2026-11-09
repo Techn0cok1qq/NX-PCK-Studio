@@ -74,6 +74,7 @@ inline std::string trim(std::string s) {
 struct Config {
     std::string token, channel;
     bool little = true;                           // endian=little|big
+    bool bgm = true;                              // bgm=on|off
 };
 
 inline const char* BASE = "sdmc:/switch/nxpckstudio/";
@@ -89,7 +90,7 @@ inline Config loadConfig() {
         mkdirs(BASE);
         f = fopen(path.c_str(), "w");
         if (f) {
-            fputs("# little (Switch) / big\nendian=little\n", f);
+            fputs("# little (Switch) / big\nendian=little\n# BGM: on / off (曲は sd:/switch/nxpckstudio/bgm/ に mp3, wav, ogg を入れると差し替わります)\nbgm=on\n", f);
             fclose(f);
         }
         return c;
@@ -104,6 +105,7 @@ inline Config loadConfig() {
         if (k == "token") c.token = v;
         else if (k == "channel") c.channel = v;
         else if (k == "endian") c.little = (v != "big");
+        else if (k == "bgm") c.bgm = !(v == "off" || v == "0" || v == "false");
     }
     fclose(f);
     return c;
