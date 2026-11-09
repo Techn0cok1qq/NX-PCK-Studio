@@ -50,6 +50,17 @@ inline std::string sanitize(const std::string& s) {
     return o;
 }
 
+// フォルダー名/ファイル名として使えない文字だけを取り除く (日本語などはそのまま)
+inline std::string cleanName(const std::string& s) {
+    std::string o;
+    for (unsigned char c : s) {
+        if (c < 0x20 || c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') continue;
+        o += (char)c;
+    }
+    size_t a = o.find_first_not_of(' '), b = o.find_last_not_of(" .");
+    return a == std::string::npos || b == std::string::npos || b < a ? "" : o.substr(a, b - a + 1);
+}
+
 inline bool isPng(std::string s) {
     for (auto& c : s) c = (char)tolower((unsigned char)c);
     return s.size() > 4 && s.compare(s.size() - 4, 4, ".png") == 0;
@@ -62,12 +73,13 @@ inline std::string trim(std::string s) {
 
 struct Config {
     std::string token, channel;
-    std::string folder = "MySkins";               // romfs/NX/<folder>/
-    std::string titleId = "01006BD001E06800";
     bool little = true;                           // endian=little|big
 };
 
 inline const char* BASE = "sdmc:/switch/nxpckstudio/";
+// 出力先: sd:/atmosphere/contents/<TITLE_ID>/romfs/NX/DLC/<パック名フォルダー>/<ファイル名>.pck
+inline const char* TITLE_ID = "01006BD001E06000";
+inline std::string dlcRoot() { return std::string("sdmc:/atmosphere/contents/") + TITLE_ID + "/romfs/NX/DLC/"; }
 
 inline Config loadConfig() {
     Config c;
@@ -77,9 +89,7 @@ inline Config loadConfig() {
         mkdirs(BASE);
         f = fopen(path.c_str(), "w");
         if (f) {
-            fputs("# romfs/NX/<folder>/ に .pck を置く (英数字)\nfolder=MySkins\n"
-                  "titleId=01006BD001E06800\n"
-                  "# little (Switch) / big\nendian=little\n", f);
+            fputs("# little (Switch) / big\nendian=little\n", f);
             fclose(f);
         }
         return c;
@@ -93,8 +103,6 @@ inline Config loadConfig() {
         std::string k = trim(s.substr(0, eq)), v = trim(s.substr(eq + 1));
         if (k == "token") c.token = v;
         else if (k == "channel") c.channel = v;
-        else if (k == "folder" && !v.empty()) c.folder = sanitize(v);
-        else if (k == "titleId" && !v.empty()) c.titleId = v;
         else if (k == "endian") c.little = (v != "big");
     }
     fclose(f);
