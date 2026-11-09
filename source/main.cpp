@@ -13,8 +13,12 @@
 #include "pck.hpp"
 #include "skin3d.hpp"
 #include "util.hpp"
+#include "update.hpp"
 
-static const char* APP_VER = "v1.0.0";
+#ifndef APP_VERSION
+#define APP_VERSION "1.0.0"   // Makefile の APP_VERSION から渡される
+#endif
+static const char* APP_VER = "v" APP_VERSION;
 
 // ---------- 色 (PCK-studio-Web の CSS と同じ) ----------
 struct C { uint8_t r, g, b, a = 255; };
@@ -917,12 +921,87 @@ static void actCopyProps(int ai) {
     markDirty();
     setStatus(std::to_string(cnt) + " 個のプロパティをコピーしました (名前・テーマ・マントは除く)");
 }
+
+// ---------- アップデート (GitHub の最新リリース) ----------
+static bool updApply = false;      // 終了後に nro を差し替えて起動し直す
+static bool updNotified = false;
+// done() が true になるまで「処理中」ダイアログを出す。B / キャンセルで upd::cancel()
+static void busyDialog(const std::string& title, const std::string& msg, bool bar, std::function<bool()> done) {
+    const int w = 760, h = 230, x = (1280 - w) / 2, y = (720 - h) / 2;
+    while (!done()) {
+        if (!appletMainLoop()) { running = false; upd::cancel(); break; }
+        Input in; pollInput(in);
+        drawAll();
+        hits.clear();
+        overlay();
+        fill(x - 2, y - 2, w + 4, h + 4, LINE); fill(x, y, w, h, SIDE);
+        fill(x, y, w, 40, BAR); fill(x, y + 40, w, 1, LINE);
+        text(SZ_M, title, x + 20, y + 20, WHITE);
+        text(SZ_M, clipText(SZ_M, msg, w - 60), x + 30, y + 80, TXT);
+        if (bar) {
+            long long now = upd::dlNow, tot = upd::dlTotal;
+            int bx = x + 30, bw = w - 60, by = y + 110;
+            fill(bx, by, bw, 22, BG); outline(bx, by, bw, 22, LINE, 1);
+            if (tot > 0) fill(bx + 2, by + 2, (int)((bw - 4) * std::min(1.0, (double)now / tot)), 18, GREEN_HI);
+            char buf[96];
+            if (tot > 0) snprintf(buf, sizeof buf, "%d%%   %.2f / %.2f MB", (int)(100.0 * now / tot), now / 1048576.0, tot / 1048576.0);
+            else snprintf(buf, sizeof buf, "%.2f MB", now / 1048576.0);
+            text(SZ_S, buf, x + w / 2, by + 44, MUTED, 1);
+        }
+        int bw2 = 200, bx2 = x + (w - bw2) / 2, by2 = y + h - 24 - 48;
+        fill(bx2, by2, bw2, 48, HOVER); outline(bx2 - 3, by2 - 3, bw2 + 6, 54, YEL);
+        text(SZ_M, "キャンセル", bx2 + bw2 / 2, by2 + 24, WHITE, 1);
+        hit(bx2, by2, bw2, 48, [] { upd::cancel(); });
+        if (in.tap) dispatchTap(in.tx, in.ty);
+        if (in.down & (HidNpadButton_B | HidNpadButton_A)) upd::cancel();
+        SDL_RenderPresent(R);
+    }
+}
+static void applyDialog() {  // ダウンロード済みの nro がある
+    std::string msg = "新しいバージョン " + upd::rel.tag + " の準備ができました。アプリを終了して更新し、自動で起動し直します。";
+    if (P.dirty) msg += "\n※ 保存していない変更は失われます。";
+    if (dialog("更新の準備ができました", msg, {"更新して再起動", "あとで"}, P.dirty ? 1 : 0) == 0) { updApply = true; running = false; }
+}
+static void actUpdate() {
+    if (upd::ready()) { applyDialog(); return; }
+    if (!upd::available()) {
+        if (upd::chk != upd::RUNNING) upd::startCheck();
+        busyDialog("アップデートの確認", "GitHub で最新バージョンを確認しています...", false, [] { return upd::chk != upd::RUNNING; });
+        if (!running) return;
+        if (upd::chk == upd::FAILED) { dialog("確認できませんでした", upd::chkErr, {"OK"}, 0); return; }
+        if (!upd::available()) {
+            if (upd::isNewerRel && !upd::rel.hasAsset) dialog("更新ファイルがありません", "新しいバージョン " + upd::rel.tag + " がありますが、リリースに .nro が付いていません。", {"OK"}, 0);
+            else dialog("最新版です", std::string("いま使っている ") + APP_VER + " が最新バージョンです。", {"OK"}, 0);
+            return;
+        }
+        updNotified = true;
+    }
+    std::string msg = std::string("現在 ") + APP_VER + "  →  新しい版 " + upd::rel.tag;
+    std::string notes = updcore::shortNotes(upd::rel.body);
+    if (!notes.empty()) msg += "\n\n" + notes;
+    if (dialog("アップデートがあります", msg, {"更新する", "あとで"}, 0) != 0) return;
+    upd::startDownload();
+    busyDialog("ダウンロード中", upd::rel.tag + " をダウンロードしています...", true, [] { return upd::dl != upd::RUNNING; });
+    if (!running) return;
+    if (upd::dl == upd::FAILED) { dialog("ダウンロードできませんでした", upd::dlErr, {"OK"}, 0); return; }
+    applyDialog();
+}
+// 毎フレーム: 起動時の自動確認が終わったらアプリ内で知らせる
+static void updPoll() {
+    upd::reap();
+    if (!updNotified && upd::chk == upd::DONE && upd::available()) {
+        updNotified = true;
+        setStatus("新しいバージョン " + upd::rel.tag + " があります (メニューの「更新」から更新できます)");
+    }
+}
+
 static const char* HOME_L[3] = {"スキンパックを作成", "既存のPCKを開く", "終了"};
 static const char* HOME_S[3] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "アプリを終了します"};
 static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else actQuit(); }
 struct MenuItem { const char* label; void (*fn)(); };
-static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"終了", actQuit}};
-static const int NMENU = 7;
+static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"更新", actUpdate}, {"終了", actQuit}};
+static const int NMENU = 8;
+static const int UPD_MENU = 6;  // 「更新」の位置 (新着バッジを付ける)
 
 // ---------- 詳細ペインの行 ----------
 struct Row {
@@ -1026,9 +1105,10 @@ static void drawMenuBar() {
     fill(0, 0, 1280, MENU_H, BAR); fill(0, MENU_H - 1, 1280, 1, LINE);
     int x = 0;
     for (int i = 0; i < NMENU; i++) {
-        int w = textW(SZ_M, MENUS[i].label) + 36;
+        int w = textW(SZ_M, MENUS[i].label) + 30;
         if (pane == MENU && menuFocus == i) { fill(x, 0, w, MENU_H - 1, LINE); outline(x + 2, 2, w - 4, MENU_H - 5, YEL); }
-        text(SZ_M, MENUS[i].label, x + 18, MENU_H / 2 - 1, WHITE);
+        text(SZ_M, MENUS[i].label, x + 15, MENU_H / 2 - 1, WHITE);
+        if (i == UPD_MENU && upd::available()) { fill(x + w - 17, 6, 12, 12, RED_HI); outline(x + w - 17, 6, 12, 12, WHITE, 1); }
         hit(x, 0, w, MENU_H, [i] { menuFocus = i; MENUS[i].fn(); });
         x += w;
     }
@@ -1218,6 +1298,13 @@ static void drawHome() {
     fill(0, 0, 1280, MENU_H, BAR); fill(0, MENU_H - 1, 1280, 1, LINE);
     text(SZ_M, "NX PCK STUDIO", 18, MENU_H / 2 - 1, YEL);
     text(SZ_S, APP_VER, 1262, MENU_H / 2, MUTED, 2);
+    {   // 更新ボタン (新しい版があれば赤く光る)
+        bool av = upd::available() || upd::ready();
+        int ux = 1090, uw = 130;
+        fill(ux, 6, uw, 28, av ? RED : LINE);
+        text(SZ_S, av ? "更新あり! (Y)" : "更新を確認 (Y)", ux + uw / 2, MENU_H / 2 - 1, WHITE, 1);
+        hit(ux, 0, uw, MENU_H, [] { actUpdate(); });
+    }
     text(SZ_L, "NX PCK STUDIO", 640, 120, YEL, 1);
     text(SZ_S, "Minecraft スキンパック作成ツール", 640, 170, MUTED, 1);
     for (int i = 0; i < 3; i++) {
@@ -1231,7 +1318,7 @@ static void drawHome() {
         hit(bx, by, bw, bh, [i] { homeFocus = i; homeAct(i); });
     }
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
-    text(SZ_S, "↑↓:選択  A:決定  +:終了", 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
+    text(SZ_S, "↑↓:選択  A:決定  Y:更新  +:終了", 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
     text(SZ_S, clipText(SZ_S, status, 900), 12, FOOT_Y + FOOT_H / 2, statusColor);
 }
 
@@ -1252,6 +1339,7 @@ static void handleInput(const Input& in) {
         if (hd & HidNpadButton_Up) homeFocus = (homeFocus + 2) % 3;
         if (hd & HidNpadButton_Down) homeFocus = (homeFocus + 1) % 3;
         if (hd & HidNpadButton_A) homeAct(homeFocus);
+        if (hd & HidNpadButton_Y) actUpdate();
         return;
     }
     bool inPv = in.sx >= PV3D.x && in.sx < PV3D.x + PV3D.w && in.sy >= PV3D.y && in.sy < PV3D.y + PV3D.h;
@@ -1306,7 +1394,7 @@ static void handleInput(const Input& in) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     romfsInit();
     plInitialize(PlServiceType_User);
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
@@ -1339,11 +1427,20 @@ int main() {
     } else if (moved) setStatus(std::to_string(moved) + " 個の画像を skins/ と capes/ に振り分けました");
     else setStatus("「スキンパックを作成」から始めましょう");
     bgmInit();
+    upd::init(cfg.repo, APP_VERSION, argc, argv);
+    {   // 前回の更新結果をアプリ内で知らせる
+        bool ok = false;
+        std::string r = upd::takeLog(ok);
+        if (ok) setStatus("更新しました: " + r);
+        else if (!r.empty()) setStatus("更新に失敗しました: " + r, true);
+    }
+    if (cfg.updCheck) upd::startCheck();   // 起動時に裏で最新版を確認 (画面は止まりません)
 
     while (running && appletMainLoop()) {
         Input in;
         pollInput(in);
         if (bgmDone) { bgmDone = false; bgmNext(); }
+        updPoll();
         handleInput(in);
         drawAll();
         SDL_RenderPresent(R);
@@ -1361,6 +1458,8 @@ int main() {
     bgmQuit();
     TTF_Quit(); IMG_Quit(); SDL_Quit();
     plExit();
+    upd::shutdown();
     romfsExit();
+    if (updApply && upd::apply()) upd::relaunch();   // romfs を閉じた後で nro を差し替え、起動し直す
     return 0;
 }

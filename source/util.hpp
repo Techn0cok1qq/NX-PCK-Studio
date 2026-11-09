@@ -75,6 +75,8 @@ struct Config {
     std::string token, channel;
     bool little = true;                           // endian=little|big
     bool bgm = true;                              // bgm=on|off
+    std::string repo = "cokacolastic/NX-PCK-Studio";  // update_repo=<owner>/<repo> (更新を探す GitHub リポジトリ)
+    bool updCheck = true;                         // update_check=on|off (起動時の自動確認)
 };
 
 inline const char* BASE = "sdmc:/switch/nxpckstudio/";
@@ -90,7 +92,7 @@ inline Config loadConfig() {
         mkdirs(BASE);
         f = fopen(path.c_str(), "w");
         if (f) {
-            fputs("# little (Switch) / big\nendian=little\n# BGM: on / off (曲は sd:/switch/nxpckstudio/bgm/ に mp3, wav, ogg を入れると差し替わります)\nbgm=on\n", f);
+            fputs("# little (Switch) / big\nendian=little\n# BGM: on / off (曲は sd:/switch/nxpckstudio/bgm/ に mp3, wav, ogg を入れると差し替わります)\nbgm=on\n# アップデート: 起動時の自動確認 on / off と、更新を探す GitHub リポジトリ\nupdate_check=on\nupdate_repo=cokacolastic/NX-PCK-Studio\n", f);
             fclose(f);
         }
         return c;
@@ -106,6 +108,8 @@ inline Config loadConfig() {
         else if (k == "channel") c.channel = v;
         else if (k == "endian") c.little = (v != "big");
         else if (k == "bgm") c.bgm = !(v == "off" || v == "0" || v == "false");
+        else if (k == "update_check") c.updCheck = !(v == "off" || v == "0" || v == "false");
+        else if (k == "update_repo" && v.find('/') != std::string::npos) c.repo = v;
     }
     fclose(f);
     return c;
