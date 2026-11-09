@@ -10,9 +10,10 @@
 #include <functional>
 #include <map>
 #include "pck.hpp"
+#include "skin3d.hpp"
 #include "util.hpp"
 
-static const char* APP_VER = "v1.0.0";
+static const char* APP_VER = "v1.1.0";
 
 // ---------- 色 (PCK-studio-Web の CSS と同じ) ----------
 struct C { uint8_t r, g, b, a = 255; };
@@ -188,7 +189,7 @@ static void dispatchTap(int x, int y) {
     }
 }
 
-struct Input { uint64_t down = 0; bool tap = false; int tx = 0, ty = 0; int dragDy = 0, sx = 0, sy = 0; };
+struct Input { uint64_t down = 0; bool tap = false; int tx = 0, ty = 0; int dragDy = 0, dragDx = 0, sx = 0, sy = 0, stx = 0, sty = 0; };
 static PadState pad;
 static void pollInput(Input& in) {
     SDL_Event ev;
@@ -205,7 +206,7 @@ static void pollInput(Input& in) {
         if (!touching) { touching = true; dragged = false; sx = lx = x; sy = ly = y; }
         else {
             if (!dragged && (abs(x - sx) > 14 || abs(y - sy) > 14)) dragged = true;
-            if (dragged) in.dragDy = y - ly;
+            if (dragged) { in.dragDy = y - ly; in.dragDx = x - lx; }
             lx = x; ly = y;
         }
     } else if (touching) {
@@ -213,6 +214,8 @@ static void pollInput(Input& in) {
         if (!dragged) { in.tap = true; in.tx = lx; in.ty = ly; }
     }
     in.sx = sx; in.sy = sy;
+    HidAnalogStickState rs = padGetStickPos(&pad, 1);
+    in.stx = rs.x; in.sty = rs.y;
 }
 
 // ---------- 画像 ----------
@@ -444,6 +447,9 @@ static int menuFocus = 0, detFocus = 0, listScroll = 0, detScroll = 0;
 static const int MENU_H = 40, INFO_Y = 40, INFO_H = 32, MAIN_Y = 72, FOOT_Y = 692, FOOT_H = 28;
 static const int SB_W = 380, HDR_H = 36, LIST_ROW = 56, ACT_H = 56, CT_X = 380, CT_W = 900, DET_Y = 372, DET_ROW = 40;
 static const SDL_Rect LIST_RECT{0, MAIN_Y + HDR_H, SB_W, FOOT_Y - MAIN_Y - HDR_H - ACT_H};
+static const SDL_Rect PV3D{CT_X + 10, MAIN_Y + HDR_H + 4, 460, DET_Y - MAIN_Y - HDR_H - 9};  // 3Dプレビュー
+static float yaw3d = 0.6f, pitch3d = 0.2f, zoom3d = 1.0f;
+static bool autoRot = true;
 static const SDL_Rect DET_RECT{CT_X, DET_Y + HDR_H, CT_W, FOOT_Y - DET_Y - HDR_H};
 
 static bool keyboard(const char* header, const std::string& init, std::string& out, int maxLen, bool numeric = false) {
@@ -758,14 +764,25 @@ static void drawPreview() {
     int cy = y0 + HDR_H, ch = h - HDR_H - 1;
     uint32_t w = 0, hh = 0;
     if (isPng(a) && pck::pngSize(a.data, w, hh)) {
-        int skinW = (a.type == 0 && !getProp(a, "CAPEPATH").empty()) ? 420 : CT_W - 40;
-        drawTex(assetTex(a.data), w, hh, CT_X + 20, cy + 8, skinW, ch - 40);
-        text(SZ_S, std::to_string(w) + "x" + std::to_string(hh) + "  " + std::to_string(a.data.size()) + " bytes", CT_X + 20 + skinW / 2, cy + ch - 14, a.data.size() > 0x7FFF ? RED_HI : MUTED, 1);
         int ci = a.type == 0 ? findAsset(getProp(a, "CAPEPATH")) : -1;
         uint32_t cw = 0, chh = 0;
-        if (ci >= 0 && pck::pngSize(P.a[ci].data, cw, chh)) {
-            drawTex(assetTex(P.a[ci].data), cw, chh, CT_X + 470, cy + 8, 410, ch - 40);
-            text(SZ_S, "マント " + std::to_string(cw) + "x" + std::to_string(chh), CT_X + 470 + 205, cy + ch - 14, MUTED, 1);
+        bool hasCape = ci >= 0 && pck::pngSize(P.a[ci].data, cw, chh);
+        if (isSkin(a)) {
+            // 3Dプレビュー (左) + 2Dのスキン画像 / マント画像 (右)
+            fill(PV3D.x, PV3D.y, PV3D.w, PV3D.h, C{0x22, 0x22, 0x22});
+            skin3d::draw(R, assetTex(a.data), w, hh, hasCape ? assetTex(P.a[ci].data) : nullptr, a.props, PV3D, yaw3d, pitch3d, zoom3d);
+            outline(PV3D.x, PV3D.y, PV3D.w, PV3D.h, LINE, 1);
+            text(SZ_S, "ドラッグ/右スティック: 回転  R: 自動回転  ZL/ZR: 拡大縮小", PV3D.x + PV3D.w / 2, PV3D.y + PV3D.h - 12, MUTED, 1);
+            int rx = CT_X + 490;
+            drawTex(assetTex(a.data), w, hh, rx, cy + 8, 200, ch - 50);
+            text(SZ_S, std::to_string(w) + "x" + std::to_string(hh) + "  " + std::to_string(a.data.size()) + "B", rx + 100, cy + ch - 18, a.data.size() > 0x7FFF ? RED_HI : MUTED, 1);
+            if (hasCape) {
+                drawTex(assetTex(P.a[ci].data), cw, chh, rx + 210, cy + 8, 190, ch - 50);
+                text(SZ_S, "マント " + std::to_string(cw) + "x" + std::to_string(chh), rx + 305, cy + ch - 18, MUTED, 1);
+            }
+        } else {
+            drawTex(assetTex(a.data), w, hh, CT_X + 20, cy + 8, CT_W - 40, ch - 40);
+            text(SZ_S, std::to_string(w) + "x" + std::to_string(hh) + "  " + std::to_string(a.data.size()) + " bytes", CT_X + CT_W / 2, cy + ch - 14, a.data.size() > 0x7FFF ? RED_HI : MUTED, 1);
         }
     } else if (a.type == 6) {
         text(SZ_S, "キー", CT_X + 20, cy + 16, MUTED); text(SZ_S, "値 (全言語共通)", CT_X + 470, cy + 16, MUTED);
@@ -866,7 +883,15 @@ static void drawAll() {
 static void handleInput(const Input& in) {
     if (in.tap) dispatchTap(in.tx, in.ty);
     if (!running) return;
-    if (in.dragDy) {
+    bool inPv = in.sx >= PV3D.x && in.sx < PV3D.x + PV3D.w && in.sy >= PV3D.y && in.sy < PV3D.y + PV3D.h;
+    if (inPv && (in.dragDx || in.dragDy)) { yaw3d -= in.dragDx * 0.012f; pitch3d = std::max(-1.2f, std::min(1.2f, pitch3d + in.dragDy * 0.008f)); autoRot = false; }
+    if (std::abs(in.stx) > 6000) { yaw3d += in.stx / 32767.f * 0.05f; autoRot = false; }
+    if (std::abs(in.sty) > 6000) pitch3d = std::max(-1.2f, std::min(1.2f, pitch3d - in.sty / 32767.f * 0.03f));
+    if (autoRot) yaw3d += 0.01f;
+    if (in.down & HidNpadButton_R) autoRot = !autoRot;
+    if (in.down & HidNpadButton_ZR) zoom3d = std::min(2.5f, zoom3d + 0.15f);
+    if (in.down & HidNpadButton_ZL) zoom3d = std::max(0.5f, zoom3d - 0.15f);
+    if (in.dragDy && !inPv) {
         if (in.sx >= LIST_RECT.x && in.sx < LIST_RECT.x + LIST_RECT.w && in.sy >= LIST_RECT.y && in.sy < LIST_RECT.y + LIST_RECT.h) listScroll -= in.dragDy;
         else if (in.sx >= DET_RECT.x && in.sy >= DET_RECT.y) detScroll -= in.dragDy;
     }
