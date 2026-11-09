@@ -73,18 +73,19 @@ static int onProgress(void*, curl_off_t total, curl_off_t now, curl_off_t, curl_
     return cancelFlag ? 1 : 0;
 }
 
-// 共通の curl 設定 (証明書は romfs の cacert.pem で検証する)
-static std::string caPem;
+// 共通の curl 設定 (証明書は romfs の cacert.pem を SDカードへ写して、そのパスで検証する)
+static std::string caPath() { return std::string(util::BASE) + "cacert.pem"; }
+static bool prepareCa(std::string& err) {
+    std::vector<uint8_t> d, cur;
+    if (!util::readFile("romfs:/cacert.pem", d) || d.size() < 1000) { err = "証明書ファイル(cacert.pem)を読めません"; return false; }
+    if (util::readFile(caPath(), cur) && cur == d) return true;   // 同じ内容なら書き直さない
+    if (!util::writeAtomic(caPath(), d)) { err = "証明書をSDカードに書き込めません"; return false; }
+    return true;
+}
 static bool setupCurl(CURL* c, const std::string& url, std::string& err) {
-    if (caPem.empty()) {
-        std::vector<uint8_t> d;
-        if (!util::readFile("romfs:/cacert.pem", d) || d.size() < 1000) { err = "証明書ファイル(cacert.pem)を読めません"; return false; }
-        caPem.assign((const char*)d.data(), d.size());
-    }
-    curl_blob blob;
-    blob.data = (void*)caPem.data(); blob.len = caPem.size(); blob.flags = CURL_BLOB_COPY;
+    if (!prepareCa(err)) return false;
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c, CURLOPT_CAINFO_BLOB, &blob);
+    curl_easy_setopt(c, CURLOPT_CAINFO, caPath().c_str());
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(c, CURLOPT_USERAGENT, "NX-PCK-Studio-updater");
