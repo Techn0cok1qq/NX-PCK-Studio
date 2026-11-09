@@ -10,6 +10,25 @@ jobs:
         run: |
           dkp-pacman -Sy --noconfirm
           dkp-pacman -S --noconfirm switch-dev switch-sdl2 switch-sdl2_image switch-sdl2_ttf
+      # PCK-studio-Web (index.html) の font-family と同じ: MCFont → Pixelify Sans → DotGothic16
+      # MCFont は romfs/minecraft.ttf (リポジトリ同梱)。残り2つは Google Fonts (OFL) から取得して romfs に入れる
+      - name: Download fonts
+        run: |
+          get() { # $1=出力先 $2...=候補URL
+            out="$1"; shift
+            for u in "$@"; do
+              if curl -fsSL --retry 3 "$u" -o "$out" && [ "$(stat -c %s "$out")" -gt 10000 ]; then echo "ok: $u"; return 0; fi
+            done
+            rm -f "$out"; return 1
+          }
+          get romfs/DotGothic16.ttf \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/dotgothic16/DotGothic16-Regular.ttf" \
+            "https://github.com/google/fonts/raw/main/ofl/dotgothic16/DotGothic16-Regular.ttf" \
+            || { echo "::error::DotGothic16 を取得できませんでした"; exit 1; }
+          get romfs/PixelifySans.ttf \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/pixelifysans/PixelifySans%5Bwght%5D.ttf" \
+            "https://github.com/google/fonts/raw/main/ofl/pixelifysans/PixelifySans%5Bwght%5D.ttf" \
+            || echo "::warning::Pixelify Sans を取得できませんでした (MCFont と DotGothic16 だけで動きます)"
       - name: Build
         run: make -j$(nproc)
       - uses: actions/upload-artifact@v4
