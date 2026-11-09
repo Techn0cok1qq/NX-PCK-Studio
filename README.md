@@ -1,19 +1,38 @@
 # NX PCK Studio
 
-スイッチ内のスキン展開図・マント画像(PNG)から、スキンパックの `.pck` を作って
-`sd:/atmosphere/contents/01006BD001E06800/romfs/NX/<folder>/` に置く Switch 自作ソフトです。
-PCKの書き出しは [PCK-studio-Web](https://github.com/HINATIR/Web-PCK-Editor) の処理を移植したもので、GPL-3.0 です。
+[PCK-studio-Web](https://github.com/Techn0cok1qq/PCK-studio-Web) と同じ画面構成(メニュー / アセット一覧 / プレビュー / アセット詳細)で、
+スキンパックの `.pck` を作って次の場所に置く Switch 自作ソフトです。
+
+    sd:/atmosphere/contents/01006BD001E06000/romfs/NX/DLC/<パック名フォルダー>/<ファイル名>.pck
+
+PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植したもので、GPL-3.0 です。
 
 - 作者: cokacolastic / バージョン: 1.0.0
 
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
 2. 自分のスキン(64x64 / 64x32)・マント(64x32)のPNGを `sd:/switch/nxpckstudio/images/` に入れる。
-3. 「スキンを作る」→ 名前・モデルを設定 → スキン展開図 / マント画像を選ぶ → 「作成して配置」。
-4. ゲームを再起動。
+3. 「スキン追加」→ 画像を選ぶ → スキン名を入力。左の一覧にアセット(スキン・マント・localisation.loc)が並びます。
+4. 一覧でアセットを選び、右下の「アセット詳細」で名前・テーマ名・スキンID・モデル・マント・プロパティ(キー/値の編集・追加・削除)を変更。
+5. 「保存して配置」→ ① パックのフォルダー名 ② PCKファイル名 を入力すると、上の場所に書き出します。
+6. ゲームを再起動。
 
-`sd:/switch/nxpckstudio/config.ini` で出力フォルダー名(`folder`)、タイトルID、エンディアン(`endian=little|big`)を変えられます。
-画像は 32767 バイト以下(超えるとゲームが落ちる恐れがあるため、作成を止めます)。
+## 操作 (ボタン / タッチどちらも可)
+| 場所 | 操作 |
+|---|---|
+| 一覧 | ↑↓ 選択 / A か → で詳細へ / X スキン追加 |
+| 詳細 | ↑↓ 選択 / A 編集 / X キー編集・マント解除 / Y プロパティ削除 / B か ← で一覧へ |
+| メニュー | L で出入り / ←→ 選択 / A 実行 |
+| 共通 | + 終了(未保存なら確認) |
+
+画像は 32767 バイト以下を推奨(超えるとゲームが落ちる恐れがあるため、一覧が赤くなり、保存時に確認します)。
+`sd:/switch/nxpckstudio/config.ini` では `endian=little|big` だけ変えられます(出力先は固定)。
+
+## フォント
+HTML の `font-family: MCFont → Pixelify Sans → DotGothic16` と同じ順で、1文字ずつ使えるフォントを探して描きます
+(どれにも無い文字は本体の共有フォント)。MCFont は `romfs/minecraft.ttf`。Pixelify Sans / DotGothic16 は
+GitHub Actions のビルド時に Google Fonts(OFL)から自動で `romfs/` に入ります。手元でビルドする場合は
+`romfs/PixelifySans.ttf` と `romfs/DotGothic16.ttf` を自分で置いてください。
 
 ## ビルド
 GitHub に push すると Actions が `nxpckstudio.nro` を作ります(devkitPro: switch-sdl2 / sdl2_image / sdl2_ttf)。
