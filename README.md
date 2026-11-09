@@ -26,7 +26,26 @@ PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植した�
 | 共通 | + 終了(未保存なら確認) |
 
 画像は 32767 バイト以下を推奨(超えるとゲームが落ちる恐れがあるため、一覧が赤くなり、保存時に確認します)。
-`sd:/switch/nxpckstudio/config.ini` では `endian=little|big` だけ変えられます(出力先は固定)。
+`sd:/switch/nxpckstudio/config.ini` では `endian=little|big` と、アップデートの設定だけ変えられます(出力先は固定)。
+
+## アップデート (アプリ内)
+GitHub の「最新リリース」を見つけて、アプリの中だけで更新できます (PC もブラウザーも不要)。
+
+- 起動すると裏で最新版を確認します。新しい版があれば画面下に表示され、メニューの「更新」(ホーム画面は右上のボタン / Y)に赤い印が付きます。
+- 「更新」→ 内容を確認 →「更新する」でダウンロード → 「更新して再起動」で、`.nro` を差し替えて自動で起動し直します。
+- ダウンロードしたファイルは サイズ / NROヘッダー / SHA-256(GitHub が返すとき)を確かめてから使います。通信は HTTPS で、証明書も検証します。
+- 失敗したときは元の `.nro` がそのまま残ります。起動時の自動確認は `config.ini` の `update_check=off` で止められます。
+- 更新を探す場所は `config.ini` の `update_repo=<ユーザー名>/<リポジトリ名>` です (既定: `cokacolastic/NX-PCK-Studio`)。
+
+### 新しい版を出す手順
+    git tag v1.0.1
+    git push origin v1.0.1
+GitHub Actions がビルドして Release を作り、`nxpckstudio.nro` を添付します。アプリのバージョンもタグ (`1.0.1`) になります。
+普段の push はビルドだけで、Release は作りません。
+
+## アイコン
+`icon.jpg` (256x256) が `.nro` に入ります。元の PCK Studio の書類アイコンに NX バッジを足したもので、
+`python3 tools/make_icon.py` (Pillow が必要) で作り直せます。透過 PNG は `assets/icon.png`。
 
 ## フォント
 HTML の `font-family: MCFont → Pixelify Sans → DotGothic16` と同じ順で、1文字ずつ使えるフォントを探して描きます
@@ -45,6 +64,8 @@ Discord のチャンネルから画像を取る同期処理(未使用・ビル�
     # verify.js は PCK-studio-Web の index.html から PckParser/LOCParser を抜き出して使います
     sed -n '/class PckParser/,/UI コントローラ/p' /path/to/PCK-studio-Web/index.html > parsers.js
     node verify.js out.pck
+    # アップデート確認のロジック (JSON / バージョン比較)
+    g++ -std=c++17 -I../source -o test_update test_update.cpp && ./test_update
 
 ## BGM
 内蔵の曲(オリジナル)が流れます。`sd:/switch/nxpckstudio/bgm/` に mp3 / wav / ogg を入れると、その曲が順番に流れます。
