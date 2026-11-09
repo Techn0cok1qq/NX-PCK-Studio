@@ -1,5 +1,9 @@
 name: build
+# main への push はビルドだけ。`v1.0.1` のようなタグを push すると GitHub Release を作って nxpckstudio.nro を添付します
+# (アプリはこの最新リリースを見つけて、アプリ内でアップデートします)
 on: [push, workflow_dispatch]
+permissions:
+  contents: write
 jobs:
   nro:
     runs-on: ubuntu-latest
@@ -8,8 +12,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install libraries
         run: |
-          dkp-pacman -Sy --noconfirm
-          dkp-pacman -S --noconfirm switch-dev switch-sdl2 switch-sdl2_image switch-sdl2_ttf
+          retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "retry $i..."; sleep $((i*15)); done; return 1; }
+          # -Sy が403で失敗してもイメージ内の既存DBで続行する
+          retry dkp-pacman -Sy --noconfirm || echo "::warning::DB同期に失敗。既存のDBで続行します"
+          retry dkp-pacman -S --needed --noconfirm switch-dev switch-sdl2 switch-sdl2_image switch-sdl2_ttf switch-sdl2_mixer switch-curl switch-mbedtls switch-zlib
       # PCK-studio-Web (index.html) の font-family と同じ: MCFont → Pixelify Sans → DotGothic16
       # MCFont は romfs/minecraft.ttf (リポジトリ同梱)。残り2つは Google Fonts (OFL) から取得して romfs に入れる
       - name: Download fonts
@@ -29,9 +35,27 @@ jobs:
             "https://raw.githubusercontent.com/google/fonts/main/ofl/pixelifysans/PixelifySans%5Bwght%5D.ttf" \
             "https://github.com/google/fonts/raw/main/ofl/pixelifysans/PixelifySans%5Bwght%5D.ttf" \
             || echo "::warning::Pixelify Sans を取得できませんでした (MCFont と DotGothic16 だけで動きます)"
+      # アップデート確認(HTTPS)でサーバー証明書を検証するための CA 一覧 (curl.se が配布している Mozilla のもの)
+      - name: Download CA bundle
+        run: |
+          for u in "https://curl.se/ca/cacert.pem" "https://github.com/bagder/ca-bundle/raw/master/ca-bundle.crt"; do
+            if curl -fsSL --retry 3 "$u" -o romfs/cacert.pem && [ "$(stat -c %s romfs/cacert.pem)" -gt 100000 ]; then echo "ok: $u"; exit 0; fi
+          done
+          echo "::error::CA 一覧を取得できませんでした"; exit 1
+      # タグ v1.2.3 のときはアプリのバージョンもそのタグ (1.2.3) にする。それ以外は Makefile の APP_VERSION
       - name: Build
-        run: make -j$(nproc)
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) make -j$(nproc) APP_VERSION="${GITHUB_REF_NAME#v}" ;;
+            *) make -j$(nproc) ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: nxpckstudio
           path: nxpckstudio.nro
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nxpckstudio.nro
+          generate_release_notes: true
