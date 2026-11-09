@@ -11,7 +11,7 @@ PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植した�
 
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
-2. 自分のスキン(64x64 / 64x32)・マント(64x32)のPNGを `sd:/switch/nxpckstudio/images/` に入れる。
+2. 自分のスキン(64x64 / 64x32)のPNGを `sd:/switch/nxpckstudio/skins/` に、マント(64x32)のPNGを `capes/` に入れる。
 3. 「スキン追加」→ 画像を選ぶ → スキン名を入力。左の一覧にアセット(スキン・マント・localisation.loc)が並びます。
 4. 一覧でアセットを選び、右下の「アセット詳細」で名前・テーマ名・スキンID・モデル・マント・プロパティ(キー/値の編集・追加・削除)を変更。
 5. 「保存して配置」→ ① パックのフォルダー名 ② PCKファイル名 を入力すると、上の場所に書き出します。
@@ -45,3 +45,10 @@ Discord のチャンネルから画像を取る同期処理(未使用・ビル�
     # verify.js は PCK-studio-Web の index.html から PckParser/LOCParser を抜き出して使います
     sed -n '/class PckParser/,/UI コントローラ/p' /path/to/PCK-studio-Web/index.html > parsers.js
     node verify.js out.pck
+
+## BGM
+内蔵の曲(オリジナル)が流れます。`sd:/switch/nxpckstudio/bgm/` に mp3 / wav / ogg を入れると、その曲が順番に流れます。
+メニューの「BGM」でオン/オフ、`config.ini` の `bgm=off` で起動時から切れます。
+
+## 操作の追加
+十字キーと左スティックは長押しで連続移動、右スティックは3Dプレビューの回転、`−` は「保存して配置」です。

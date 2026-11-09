@@ -18,9 +18,9 @@ export PKG_CONFIG_PATH := $(PORTLIBS)/lib/pkgconfig
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CXXFLAGS := -g -O2 -Wall -ffunction-sections $(ARCH) -D__SWITCH__ -std=gnu++17 -fno-rtti -fno-exceptions \
             -I$(LIBNX)/include -I$(PORTLIBS)/include \
-            $(shell $(PKGCONF) --cflags sdl2 SDL2_image SDL2_ttf)
+            $(shell $(PKGCONF) --cflags sdl2 SDL2_image SDL2_ttf SDL2_mixer)
 LDFLAGS  := -specs=$(LIBNX)/switch.specs -g $(ARCH) -Wl,-Map,$(TARGET).map
-LIBS     := $(shell $(PKGCONF) --libs --static SDL2_image SDL2_ttf sdl2) -lnx
+LIBS     := $(shell $(PKGCONF) --libs --static SDL2_image SDL2_ttf SDL2_mixer sdl2) -lnx
 
 CXX := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-g++
 OBJS := $(patsubst source/%.cpp,build/%.o,$(wildcard source/*.cpp))
