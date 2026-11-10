@@ -8,7 +8,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET      := nxpckstudio
 APP_TITLE   := NX PCK Studio
 APP_AUTHOR  := cokacolastic
-APP_VERSION := 1.0.0
+APP_VERSION := 1.0.1
 ROMFS       := romfs
 ICON        := icon.jpg
 

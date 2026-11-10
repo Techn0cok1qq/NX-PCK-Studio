@@ -9,7 +9,7 @@
 
 PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植したもので、GPL-3.0 です。
 
-- 作者: cokacolastic / バージョン: 1.0.0
+- 作者: cokacolastic / バージョン: 1.0.1
 
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
@@ -58,8 +58,31 @@ GitHub Actions のビルド時に Google Fonts(OFL)から自動で `romfs/` に�
 ## ビルド
 GitHub に push すると Actions が `nxpckstudio.nro` を作ります(devkitPro: switch-sdl2 / sdl2_image / sdl2_ttf)。
 
-## extras/
-Discord のチャンネルから画像を取る同期処理(未使用・ビルド対象外)。
+## Discord 同期
+Discord のチャンネルに貼ったスキン / マントの PNG を、メニューの「Discord」(ホーム画面は X)で SD に取り込みます。
+PC もブラウザーも使わずに、スマホなどから送った画像でスキンが作れます。
+
+### 準備 (最初の1回だけ)
+画面の表記は Discord の更新で変わることがあります。
+1. [Discord Developer Portal](https://discord.com/developers/applications) で「New Application」を作る。
+2. 左の「Bot」で「Reset Token」を押して Token をコピーする (人に見せないこと)。
+3. 同じ「Bot」の画面で **Message Content Intent を ON** にする (OFF だと他の人の投稿の添付が空になります)。
+4. 「OAuth2 → URL Generator」で `bot` を選び、権限は「View Channels」「Read Message History」。できた URL を開いてサーバーに招待する。
+5. Discord の「設定 → 詳細設定 → 開発者モード」を ON にして、画像を貼るチャンネルを右クリック →「チャンネルIDをコピー」。
+6. `sd:/switch/nxpckstudio/config.ini` に書く:
+
+       token=<コピーした Token>
+       channel=<チャンネルID (数字)>
+
+### 使い方
+チャンネルに PNG を貼る → アプリのメニュー「Discord」(ホーム画面は X)。直近 100 件のメッセージから、まだ取っていない PNG を保存します。
+- 64x64 → `skins/`
+- 64x32 でファイル名に `cape` / `マント` が入っている → `capes/`、`skin` / `スキン` が入っている → `skins/`
+- 64x32 で名前からは分からない → `skins/` と `capes/` の両方 (古い形式のスキンにもマントにもなるため)
+- 上以外の大きさ、1MB を超える画像 → 取りません
+- 保存した画像の ID は `discord_seen.txt` に控えます。SD から消した画像を、次の同期で取り直すことはありません
+  (取り直したいときは `discord_seen.txt` を消す)。
+- Token は SD の `config.ini` に平文で入ります。Bot は「読むだけ」の権限にして、SD カードを人に渡すときは Token を作り直してください。
 
 ## PC上のテスト (devkitPro 不要)
     cd tests && g++ -std=c++17 -o test_pck test_pck.cpp && ./test_pck skin.png cape.png out.pck
@@ -68,6 +91,8 @@ Discord のチャンネルから画像を取る同期処理(未使用・ビル�
     node verify.js out.pck
     # アップデート確認のロジック (JSON / バージョン比較)
     g++ -std=c++17 -I../source -o test_update test_update.cpp && ./test_update
+    # Discord 同期のロジック (添付の取り出し / スキンかマントかの判定)
+    g++ -std=c++17 -I../source -o test_discord test_discord.cpp && ./test_discord
 
 ## BGM
 内蔵の曲(オリジナル)が流れます。`sd:/switch/nxpckstudio/bgm/` に mp3 / wav / ogg を入れると、その曲が順番に流れます。
