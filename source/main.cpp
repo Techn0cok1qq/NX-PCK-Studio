@@ -14,9 +14,10 @@
 #include "skin3d.hpp"
 #include "util.hpp"
 #include "update.hpp"
+#include "discord.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "1.0.0"   // Makefile の APP_VERSION から渡される
+#define APP_VERSION "1.0.1"   // Makefile の APP_VERSION から渡される
 #endif
 static const char* APP_VER = "v" APP_VERSION;
 
@@ -925,11 +926,14 @@ static void actCopyProps(int ai) {
 // ---------- アップデート (GitHub の最新リリース) ----------
 static bool updApply = false;      // 終了後に nro を差し替えて起動し直す
 static bool updNotified = false;
-// done() が true になるまで「処理中」ダイアログを出す。B / キャンセルで upd::cancel()
-static void busyDialog(const std::string& title, const std::string& msg, bool bar, std::function<bool()> done) {
+// done() が true になるまで「処理中」ダイアログを出す。B / キャンセルで onCancel (省略時は upd::cancel())
+// sub を渡すと、バーの代わりにその文字列 (進み具合など) を毎フレーム表示する
+static void busyDialog(const std::string& title, const std::string& msg, bool bar, std::function<bool()> done,
+                       std::function<void()> onCancel = nullptr, std::function<std::string()> sub = nullptr) {
     const int w = 760, h = 230, x = (1280 - w) / 2, y = (720 - h) / 2;
+    auto cancelIt = [&onCancel] { if (onCancel) onCancel(); else upd::cancel(); };
     while (!done()) {
-        if (!appletMainLoop()) { running = false; upd::cancel(); break; }
+        if (!appletMainLoop()) { running = false; upd::cancel(); dc::cancel(); break; }
         Input in; pollInput(in);
         drawAll();
         hits.clear();
@@ -947,13 +951,15 @@ static void busyDialog(const std::string& title, const std::string& msg, bool ba
             if (tot > 0) snprintf(buf, sizeof buf, "%d%%   %.2f / %.2f MB", (int)(100.0 * now / tot), now / 1048576.0, tot / 1048576.0);
             else snprintf(buf, sizeof buf, "%.2f MB", now / 1048576.0);
             text(SZ_S, buf, x + w / 2, by + 44, MUTED, 1);
+        } else if (sub) {
+            text(SZ_M, sub(), x + w / 2, y + 125, MUTED, 1);
         }
         int bw2 = 200, bx2 = x + (w - bw2) / 2, by2 = y + h - 24 - 48;
         fill(bx2, by2, bw2, 48, HOVER); outline(bx2 - 3, by2 - 3, bw2 + 6, 54, YEL);
         text(SZ_M, "キャンセル", bx2 + bw2 / 2, by2 + 24, WHITE, 1);
-        hit(bx2, by2, bw2, 48, [] { upd::cancel(); });
+        hit(bx2, by2, bw2, 48, [&cancelIt] { cancelIt(); });
         if (in.tap) dispatchTap(in.tx, in.ty);
-        if (in.down & (HidNpadButton_B | HidNpadButton_A)) upd::cancel();
+        if (in.down & (HidNpadButton_B | HidNpadButton_A)) cancelIt();
         SDL_RenderPresent(R);
     }
 }
@@ -995,12 +1001,49 @@ static void updPoll() {
     }
 }
 
-static const char* HOME_L[3] = {"スキンパックを作成", "既存のPCKを開く", "終了"};
+// ---------- Discord 同期 (チャンネルに貼られた PNG を skins/ capes/ に保存) ----------
+static void actDiscord() {
+    util::Config c = util::loadConfig();   // 毎回 config.ini を読み直す
+    cfg.token = c.token; cfg.channel = c.channel;
+    if (cfg.token.empty() || cfg.channel.empty()) {
+        dialog("Discord同期の設定", "sd:/switch/nxpckstudio/config.ini に、次の2行を書いてください。\n\ntoken=<BotのToken>\nchannel=<チャンネルID>\n\n書き方は README にあります。", {"OK"}, 0);
+        return;
+    }
+    if (upd::busy()) {   // アップデート確認と通信が重ならないように待つ
+        bool giveUp = false;
+        busyDialog("Discord同期", "ほかの通信が終わるのを待っています...", false, [&giveUp] { return giveUp || !upd::busy(); }, [&giveUp] { giveUp = true; });
+        if (giveUp || !running) return;
+    }
+    if (!dc::start(cfg.token, cfg.channel, skinDir(), capeDir())) { dialog("同期できません", dc::err, {"OK"}, 0); return; }
+    busyDialog("Discord同期", "チャンネルの画像を取り込んでいます...", false, [] { return dc::st != upd::RUNNING; }, [] { dc::cancel(); },
+               [] { return dc::totalN > 0 ? std::to_string((int)dc::nowN) + " / " + std::to_string((int)dc::totalN) + " 枚" : std::string("確認中..."); });
+    if (!running) return;
+    if (dc::st == upd::FAILED) {
+        if (dc::cancelled()) setStatus("Discord同期を中止しました");
+        else dialog("同期できませんでした", dc::err, {"OK"}, 0);
+        return;
+    }
+    int total = dc::nSkin + dc::nCape + dc::nBoth;
+    std::string msg;
+    if (!total && !dc::nFail && !dc::nSkip) msg = "新しい画像はありませんでした。";
+    else {
+        msg = std::to_string(total) + " 枚を保存しました。";
+        if (dc::nSkin) msg += "\nスキン: " + std::to_string(dc::nSkin) + " 枚";
+        if (dc::nCape) msg += "\nマント: " + std::to_string(dc::nCape) + " 枚";
+        if (dc::nBoth) msg += "\n64x32 でどちらか分からない画像: " + std::to_string(dc::nBoth) + " 枚 (スキンにもマントにも入れました)";
+        if (dc::nSkip) msg += "\n使えない大きさの画像: " + std::to_string(dc::nSkip) + " 枚 (64x64 / 64x32 のみ)";
+        if (dc::nFail) msg += "\n取得に失敗: " + std::to_string(dc::nFail) + " 枚 (もう一度同期すると再挑戦します)";
+    }
+    setStatus(total ? "Discordから " + std::to_string(total) + " 枚の画像を保存しました" : "Discord同期: 新しい画像はありません");
+    dialog("Discord同期", msg, {"OK"}, 0);
+}
+
+static const char* HOME_L[3] ={"スキンパックを作成", "既存のPCKを開く", "終了"};
 static const char* HOME_S[3] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "アプリを終了します"};
 static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else actQuit(); }
 struct MenuItem { const char* label; void (*fn)(); };
-static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"更新", actUpdate}, {"終了", actQuit}};
-static const int NMENU = 8;
+static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"更新", actUpdate}, {"Discord", actDiscord}, {"終了", actQuit}};
+static const int NMENU = 9;
 static const int UPD_MENU = 6;  // 「更新」の位置 (新着バッジを付ける)
 
 // ---------- 詳細ペインの行 ----------
@@ -1112,7 +1155,8 @@ static void drawMenuBar() {
         hit(x, 0, w, MENU_H, [i] { menuFocus = i; MENUS[i].fn(); });
         x += w;
     }
-    text(SZ_M, "NX PCK STUDIO", 1262 - textW(SZ_S, APP_VER) - 12, MENU_H / 2 - 1, YEL, 2);
+    int titleW = textW(SZ_M, "NX PCK STUDIO"), verX = 1262 - textW(SZ_S, APP_VER) - 12;
+    if (x + 16 < verX - titleW) text(SZ_M, "NX PCK STUDIO", verX, MENU_H / 2 - 1, YEL, 2);   // メニューと重なるときはタイトルを省く
     text(SZ_S, APP_VER, 1262, MENU_H / 2 + 2, MUTED, 2);
 }
 static int badge(int x, int cy, const std::string& s) {
@@ -1304,6 +1348,10 @@ static void drawHome() {
         fill(ux, 6, uw, 28, av ? RED : LINE);
         text(SZ_S, av ? "更新あり! (Y)" : "更新を確認 (Y)", ux + uw / 2, MENU_H / 2 - 1, WHITE, 1);
         hit(ux, 0, uw, MENU_H, [] { actUpdate(); });
+        int dx = 940, dw = 140;   // Discord 同期ボタン
+        fill(dx, 6, dw, 28, LINE);
+        text(SZ_S, "Discord同期 (X)", dx + dw / 2, MENU_H / 2 - 1, WHITE, 1);
+        hit(dx, 0, dw, MENU_H, [] { actDiscord(); });
     }
     text(SZ_L, "NX PCK STUDIO", 640, 120, YEL, 1);
     text(SZ_S, "Minecraft スキンパック作成ツール", 640, 170, MUTED, 1);
@@ -1318,7 +1366,7 @@ static void drawHome() {
         hit(bx, by, bw, bh, [i] { homeFocus = i; homeAct(i); });
     }
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
-    text(SZ_S, "↑↓:選択  A:決定  Y:更新  +:終了", 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
+    text(SZ_S, "↑↓:選択  A:決定  X:Discord同期  Y:更新  +:終了", 1270, FOOT_Y + FOOT_H / 2, MUTED, 2);
     text(SZ_S, clipText(SZ_S, status, 900), 12, FOOT_Y + FOOT_H / 2, statusColor);
 }
 
@@ -1339,6 +1387,7 @@ static void handleInput(const Input& in) {
         if (hd & HidNpadButton_Up) homeFocus = (homeFocus + 2) % 3;
         if (hd & HidNpadButton_Down) homeFocus = (homeFocus + 1) % 3;
         if (hd & HidNpadButton_A) homeAct(homeFocus);
+        if (hd & HidNpadButton_X) actDiscord();
         if (hd & HidNpadButton_Y) actUpdate();
         return;
     }
@@ -1458,6 +1507,7 @@ int main(int argc, char** argv) {
     bgmQuit();
     TTF_Quit(); IMG_Quit(); SDL_Quit();
     plExit();
+    dc::shutdown();    // ソケットを閉じる前に Discord 同期のスレッドを止める
     upd::shutdown();
     romfsExit();
     if (updApply && upd::apply()) upd::relaunch();   // romfs を閉じた後で nro を差し替え、起動し直す
