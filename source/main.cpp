@@ -609,7 +609,8 @@ static bool keyboard(const char* header, const std::string& init, std::string& o
     swkbdConfigSetHeaderText(&k, header);
     swkbdConfigSetInitialText(&k, init.c_str());
     swkbdConfigSetStringLenMax(&k, maxLen);
-    if (numeric) swkbdConfigSetType(&k, SwkbdType_NumPad);
+    // 種類を「通常」にする: プリセットのままだと QWERTY になり、本体の言語のキーボード(かな入力など)が出ない
+    swkbdConfigSetType(&k, numeric ? SwkbdType_NumPad : SwkbdType_Normal);
     char buf[512] = {0};
     Result rc = swkbdShow(&k, buf, sizeof buf);
     swkbdClose(&k);
