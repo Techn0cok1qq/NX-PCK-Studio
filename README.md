@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="200">
+
 # NX PCK Studio
 
 [PCK-studio-Web](https://github.com/Techn0cok1qq/PCK-studio-Web) と同じ画面構成(メニュー / アセット一覧 / プレビュー / アセット詳細)で、
