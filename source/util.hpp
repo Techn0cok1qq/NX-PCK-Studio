@@ -92,7 +92,7 @@ inline Config loadConfig() {
         mkdirs(BASE);
         f = fopen(path.c_str(), "w");
         if (f) {
-            fputs("# little (Switch) / big\nendian=little\n# BGM: on / off (曲は sd:/switch/nxpckstudio/bgm/ に mp3, wav, ogg を入れると差し替わります)\nbgm=on\n# アップデート: 起動時の自動確認 on / off と、更新を探す GitHub リポジトリ\nupdate_check=on\nupdate_repo=cokacolastic/NX-PCK-Studio\n# Discord同期: Bot の Token と、画像を貼るチャンネルのID (書き方は README)\n#token=\n#channel=\n", f);
+            fputs("# little (Switch) / big\nendian=little\n# BGM: on / off (曲は sd:/switch/nxpckstudio/bgm/ に mp3, wav, ogg を入れると差し替わります)\nbgm=on\n# アップデート: 起動時の自動確認 on / off と、更新を探す GitHub リポジトリ\nupdate_check=on\nupdate_repo=Techn0cok1qq/NX-PCK-Studio\n# Discord同期: Bot の Token と、画像を貼るチャンネルのID (書き方は README)\n#token=\n#channel=\n", f);
             fclose(f);
         }
         return c;
