@@ -1,0 +1,45 @@
+// cd tests && g++ -std=c++17 -I../source -o test_discord test_discord.cpp && ./test_discord
+#include <cassert>
+#include <cstdio>
+#include "dccore.hpp"
+using namespace dccore;
+int main() {
+    // 判定
+    assert(classify("a.png", 64, 64) == SKIN);
+    assert(classify("my_cape.png", 64, 64) == SKIN);        // 大きさが決め手 (64x64 のマントは無い)
+    assert(classify("Cape.PNG", 64, 32) == CAPE);
+    assert(classify("赤いマント.png", 64, 32) == CAPE);
+    assert(classify("skin.png", 64, 32) == SKIN);
+    assert(classify("青のスキン.png", 64, 32) == SKIN);
+    assert(classify("image.png", 64, 32) == BOTH);
+    assert(classify("cape_skin.png", 64, 32) == BOTH);       // 両方入っていれば決められない
+    assert(classify("a.png", 128, 128) == SKIP);
+    assert(classify("a.png", 64, 48) == SKIP);
+    assert(classify("a.png", 22, 17) == SKIP);
+
+    // 添付の取り出し (応答は新しい順 → 古い順に並ぶ)
+    std::string js = R"([
+      {"id":"1003","attachments":[{"id":"2002","filename":"my cape.PNG","size":148,"url":"https://cdn.discordapp.com/a/2002/cape.PNG?ex=1&is=2&hm=3","content_type":"image/png"}]},
+      {"id":"1002","attachments":[{"id":"2001","filename":"skin.png","size":208,"url":"https://cdn.discordapp.com/a/2001/skin.png?ex=1&is=2&hm=3"},
+                                   {"id":"2003","filename":"スキン.png","size":300,"url":"https://cdn.discordapp.com/a/2003/x.png"}]},
+      {"id":"1001","attachments":[{"id":"2000","filename":"notes.txt","size":10,"url":"https://cdn.discordapp.com/a/notes.txt","content_type":"text/plain"}]},
+      {"id":"1000","content":"hi","attachments":[]},
+      {"id":"999"}
+    ])";
+    std::vector<Att> a;
+    assert(parseMessages(js, a));
+    assert(a.size() == 4);
+    assert(a[0].id == "2000" && !looksPng(a[0]));            // 古い順
+    assert(a[1].id == "2001" && looksPng(a[1]) && a[1].size == 208);
+    assert(a[1].url == "https://cdn.discordapp.com/a/2001/skin.png?ex=1&is=2&hm=3");   // & が & に戻る
+    assert(a[2].id == "2003" && a[2].name == "スキン.png");
+    assert(a[3].id == "2002" && looksPng(a[3]));
+    Att t; t.name = "noext"; t.type = "image/png"; assert(looksPng(t));
+    t.name = "x.jpg"; t.type = "image/jpeg"; assert(!looksPng(t));
+
+    // 壊れた / 想定外の応答
+    assert(!parseMessages(R"({"message":"401: Unauthorized","code":0})", a));
+    assert(!parseMessages("<html>", a));
+    assert(parseMessages("[]", a) && a.empty());
+    puts("ok");
+}
