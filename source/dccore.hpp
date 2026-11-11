@@ -2,6 +2,7 @@
 // libnx にも curl にも依存しないので、PC 上で tests/test_discord.cpp からテストできます。
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 #include "updcore.hpp"
@@ -22,6 +23,17 @@ inline bool looksPng(const Att& a) {
     if (n.size() > 4 && n.compare(n.size() - 4, 4, ".png") == 0) return true;
     return lowerAscii(a.type) == "image/png";
 }
+
+// GIF / ZIP の添付か (アニメーションスキン用。anim/ に保存する)
+inline bool endsWith(const std::string& s, const char* ext) { size_t n = strlen(ext); return s.size() >= n && s.compare(s.size() - n, n, ext) == 0; }
+inline bool looksGif(const Att& a) { return endsWith(lowerAscii(a.name), ".gif") || lowerAscii(a.type) == "image/gif"; }
+inline bool looksZip(const Att& a) {
+    std::string t = lowerAscii(a.type);
+    return endsWith(lowerAscii(a.name), ".zip") || t == "application/zip" || t == "application/x-zip-compressed";
+}
+// 中身が本当に GIF / ZIP か (先頭のバイトで確かめる)
+inline bool isGifData(const std::string& d) { return d.size() > 6 && d.compare(0, 4, "GIF8") == 0; }
+inline bool isZipData(const std::string& d) { return d.size() > 22 && d[0] == 'P' && d[1] == 'K'; }
 
 // GET /channels/{id}/messages の応答 (新しい順の配列) から添付を取り出す。古い順に並べ替えて返す
 inline bool parseMessages(const std::string& json, std::vector<Att>& out) {

@@ -12,6 +12,7 @@
 #include <map>
 #include "pck.hpp"
 #include "animcape.hpp"
+#include "zipread.hpp"
 #include "skin3d.hpp"
 #include "util.hpp"
 #include "update.hpp"
@@ -257,7 +258,7 @@ static SDL_Texture* assetTex(const std::vector<uint8_t>& d) {
     h ^= d.size();
     auto it = atex.find(h);
     if (it != atex.end()) return it->second;
-    if (atex.size() > 48) { for (auto& kv : atex) if (kv.second) SDL_DestroyTexture(kv.second); atex.clear(); }
+    if (atex.size() > 160) { for (auto& kv : atex) if (kv.second) SDL_DestroyTexture(kv.second); atex.clear(); }
     SDL_Texture* t = IMG_LoadTexture_RW(R, SDL_RWFromConstMem(d.data(), (int)d.size()), 1);
     atex[h] = t;
     return t;
@@ -380,6 +381,8 @@ static bool home = true;         // 起動直後のホーム画面
 static int homeFocus = 0;
 static void kvSet(KV& v, const std::string& k, const std::string& val) { for (auto& e : v) if (e.first == k) { e.second = val; return; } v.push_back({k, val}); }
 static int sel = 0;
+static bool playing = false;       // スキン/マントを順番に切り替えて再生中
+static uint64_t playTick = 0;
 static std::string lastFolder, lastFile;
 
 static uint32_t rnd() {
@@ -420,7 +423,7 @@ static void rebuildLoc() {  // 〜ID プロパティ(IDS_…)と対応する文�
 }
 static void markDirty() { P.dirty = true; rebuildLoc(); }
 static void newPkg() {
-    P.a.clear(); P.name.clear(); P.dirty = false; P.type = 8; sel = 0; locBase.clear(); locOver.clear(); locDel.clear(); cfg.little = util::loadConfig().little;
+    P.a.clear(); P.name.clear(); P.dirty = false; P.type = 8; sel = 0; playing = false; locBase.clear(); locOver.clear(); locDel.clear(); cfg.little = util::loadConfig().little;
     pck::Asset root; root.name = "0"; root.type = 4; root.props.push_back({"PACKID", std::to_string(1 + rnd() % 0xFFFFFE)});
     pck::Asset loc; loc.name = "localisation.loc"; loc.type = 6;
     P.a.push_back(root); P.a.push_back(loc);
@@ -581,7 +584,7 @@ static bool openPck(const std::string& path, const std::string& folder, const st
     if (li >= 0) loc = as[li]; else { loc.name = "localisation.loc"; loc.type = 6; }
     n.push_back(root); n.push_back(loc);
     for (size_t i = 0; i < as.size(); i++) if ((int)i != ri && (int)i != li) n.push_back(as[i]);
-    P.a = n; P.type = type; cfg.little = little; P.dirty = false; sel = 0; P.name.clear();
+    P.a = n; P.type = type; cfg.little = little; P.dirty = false; sel = 0; playing = false; P.name.clear();
     locBase.clear(); locOver.clear(); locDel.clear();
     if (!loc.data.empty() && pck::parseLoc(loc.data, locBase)) for (auto& e : locBase) if (e.first == "IDS_DISPLAY_NAME") P.name = e.second;
     locEntries = locBase;
@@ -856,7 +859,7 @@ static void actQuit() {
 }
 static void actHome() {
     if (P.dirty && dialog("ホームに戻る", "保存していない内容は破棄されます。戻りますか?", {"戻る", "やめる"}, 1) != 0) return;
-    P.dirty = false; home = true; homeFocus = 0; pane = LIST;
+    P.dirty = false; playing = false; home = true; homeFocus = 0; pane = LIST;
 }
 static void actCreatePack() {
     std::string name;
@@ -903,6 +906,7 @@ static void actRandAll() {
 // Animation-Cape-SkinPack-Generator の移植: GIF の各コマを TemplateCapes.png に合成してマントにし、
 // 選んだスキンと 1 コマずつ組み合わせた PCK をエディターに作る (保存は「保存して配置」)
 static std::string animDir() { return std::string(util::BASE) + "anim/"; }
+static bool animSkinOk(uint32_t w, uint32_t h) { return w > 0 && (w == h || w == h * 2); }   // 本家と同じ: 幅=高さ または 幅=高さ×2
 static bool animProgress(const std::string& title, const std::string& msg, const std::string& sub) {   // false = B でキャンセル
     if (!appletMainLoop()) { running = false; return false; }
     Input in; pollInput(in);
@@ -933,7 +937,7 @@ static bool loadTemplate(std::vector<uint8_t>& px, int& w, int& h) {
 }
 static void actAnimPack() {
     if (dialog("アニメーションスキンを作成 (上級者向け)",
-               "GIFの各コマをマントにして、選んだスキンと1コマずつ組み合わせたパックを作ります。\nGIFは sd:/switch/nxpckstudio/anim/ に、スキンは skins/ に入れてください。(MP4は非対応)",
+               "GIFの各コマをマントにして、スキンと1コマずつ組み合わせたパックを作ります。スキンも連番PNGやZIPでアニメーションにできます。\nGIFは sd:/switch/nxpckstudio/anim/ に、スキンのPNG/ZIPは skins/ か anim/ に入れてください。(MP4は非対応)",
                {"進む", "やめる"}, 0) != 0) return;
     // ① GIF (なしも選べる = スキンだけのパック)
     struct G { std::string path, name; size_t size = 0; };
@@ -955,18 +959,48 @@ static void actAnimPack() {
     for (auto& g : gifs) { gl.push_back(g.name); gs.push_back(std::to_string(g.size / 1024) + " KB"); }
     int gi = pickList("アニメーションGIFを選ぶ (anim/ フォルダー)", gl, gs, nullptr, "");
     if (gi < 0) return;
-    // ② スキン (複数)
-    std::vector<Img> sk;
-    for (auto& im : scanImages(skinDir())) if (fitsSkin(im)) sk.push_back(im);
-    if (sk.empty()) { dialog("スキンがありません", "sd:/switch/nxpckstudio/skins/ に 64x64 / 64x32 のPNGを入れてください。", {"OK"}, 0); return; }
-    std::sort(sk.begin(), sk.end(), [](const Img& a, const Img& b) { return anim::naturalLess(a.name, b.name); });   // skin_2 < skin_10
+    // ② スキン (PNG と ZIP。ZIP の中の PNG は連番スキンとして展開する)
+    struct SE { std::string label, sub, path; bool zip = false; };
+    std::vector<SE> se;
+    for (auto& im : scanImages(skinDir())) if (animSkinOk(im.w, im.h)) se.push_back({im.name, std::to_string(im.w) + "x" + std::to_string(im.h), im.path, false});
+    for (const std::string& dir : {skinDir(), animDir()}) {
+        DIR* d = opendir(dir.c_str());
+        if (!d) continue;
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            if (n.size() < 5) continue;
+            std::string ext = n.substr(n.size() - 4); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+            if (ext != ".zip") continue;
+            std::string path = dir + n;
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0 || st.st_size > (64 << 20)) continue;
+            std::vector<uint8_t> z;
+            if (!util::readFile(path, z)) continue;
+            int cnt = zr::countPng(z);
+            if (cnt) se.push_back({(dir == animDir() ? "anim/" : "") + n, "ZIP  " + std::to_string(cnt) + " 枚", path, true});
+        }
+        closedir(d);
+    }
+    if (se.empty()) { dialog("スキンがありません", "sd:/switch/nxpckstudio/skins/ に 64x64 / 64x32 のPNG、または連番PNGを入れたZIPを入れてください。", {"OK"}, 0); return; }
+    std::sort(se.begin(), se.end(), [](const SE& a, const SE& b) { return anim::naturalLess(a.label, b.label); });
     std::vector<std::string> sl, ss;
-    for (auto& im : sk) { sl.push_back(im.name); ss.push_back(std::to_string(im.w) + "x" + std::to_string(im.h)); }
-    std::vector<char> chk(sk.size(), 0);
-    if (pickList("スキンを選ぶ (複数選択・名前の数字順)", sl, ss, &chk, "", "これで作る") < 0) return;
-    std::vector<Img> chosen;
-    for (size_t i = 0; i < sk.size(); i++) if (chk[i]) chosen.push_back(sk[i]);
-    if (chosen.empty()) return;
+    for (auto& x : se) { sl.push_back(x.label); ss.push_back(x.sub); }
+    std::vector<char> chk(se.size(), 0);
+    if (pickList("スキンを選ぶ (複数選択・ZIPは中のPNGを数字順に並べます)", sl, ss, &chk, "", "これで作る") < 0) return;
+    std::vector<zr::Named> chosen;
+    int bad = 0;
+    for (size_t i = 0; i < se.size(); i++) if (chk[i]) {
+        std::vector<uint8_t> raw;
+        if (!util::readFile(se[i].path, raw)) continue;
+        std::vector<zr::Named> got;
+        if (se[i].zip) zr::readPngs(raw, got); else got.push_back(zr::Named{se[i].label, std::move(raw)});
+        for (auto& g : got) {
+            uint32_t w = 0, h = 0;
+            if (pck::pngSize(g.data, w, h) && animSkinOk(w, h)) chosen.push_back(std::move(g)); else bad++;
+        }
+    }
+    if (chosen.empty()) { dialog("スキンがありません", "選んだものに使えるスキン画像がありませんでした。(幅=高さ、または幅=高さ×2のPNG)", {"OK"}, 0); return; }
+    std::stable_sort(chosen.begin(), chosen.end(), [](const zr::Named& a, const zr::Named& b) { return anim::naturalLess(a.name, b.name); });   // skin_2 < skin_10
     // ③ 名前
     std::string packName, prefix;
     if (!keyboard("スキンパックの名前", "", packName, 30) || packName.empty()) return;
@@ -996,9 +1030,7 @@ static void actAnimPack() {
         if (n < 0 || capes.empty()) { dialog("読めません", "このGIFを読み込めませんでした。\n壊れているか、対応していない形式です。", {"OK"}, 0); return; }
     }
     // ⑤ パックを組み立てる (スキンとマントを 1 対 1 でペアにする。数が違えば少ない方を繰り返す)
-    std::vector<std::vector<uint8_t>> sdata;
-    for (auto& im : chosen) { std::vector<uint8_t> d; if (!readImg(im, d)) return; sdata.push_back(std::move(d)); }
-    size_t pairs = std::max(sdata.size(), capes.size());
+    size_t pairs = std::max(chosen.size(), capes.size());
     newPkg(); P.name = packName;
     lastFolder.clear(); lastFile.clear();
     uint32_t base = 100000 + rnd() % (99899999 - (uint32_t)pairs + 1);
@@ -1006,7 +1038,7 @@ static void actAnimPack() {
         std::string ids = pck::pad8(base + (uint32_t)i);
         char nb[16]; snprintf(nb, sizeof nb, " %02d", (int)(i + 1));
         std::string name = prefix + nb, capeName = "dlccape" + ids + ".png";
-        pck::Asset s; s.name = "dlcskin" + ids + ".png"; s.type = 0; s.data = sdata[i % sdata.size()];
+        pck::Asset s; s.name = "dlcskin" + ids + ".png"; s.type = 0; s.data = chosen[i % chosen.size()].data;
         s.props = {{"DISPLAYNAME", name}, {"DISPLAYNAMEID", "IDS_dlcskin" + ids + "_DISPLAYNAME"}, {"ANIM", "0x00040000"}, {"GAME_FLAGS", "0x18"}, {"FREE", "1"}};
         if (!capes.empty()) s.props.push_back({"CAPEPATH", capeName});
         P.a.push_back(std::move(s));
@@ -1016,7 +1048,7 @@ static void actAnimPack() {
     markDirty();
     std::string msg = std::to_string(pairs) + " 個のスキン" + (capes.empty() ? "(マントなし)" : "とマントのペア") + "でパックを作りました: " + packName;
     setStatus(msg);
-    dialog("パックを作りました", msg + (truncated ? "\n※ GIFが長いため最初の300コマだけ使いました。" : "") + "\n\n左の一覧で確認し、「保存して配置」(−ボタン)で書き出してください。", {"OK"}, 0);
+    dialog("パックを作りました", msg + (truncated ? "\n※ GIFが長いため最初の300コマだけ使いました。" : "") + (bad ? "\n※ 使えない画像を " + std::to_string(bad) + " 枚飛ばしました。" : "") + "\n\n「再生」(左スティック押し込み)で動きを確認し、「保存して配置」(−ボタン)で書き出してください。", {"OK"}, 0);
 }
 static void actCopyProps(int ai) {
     PckFile f;
@@ -1135,7 +1167,7 @@ static void actDiscord() {
         busyDialog("Discord同期", "ほかの通信が終わるのを待っています...", false, [&giveUp] { return giveUp || !upd::busy(); }, [&giveUp] { giveUp = true; });
         if (giveUp || !running) return;
     }
-    if (!dc::start(cfg.token, cfg.channel, skinDir(), capeDir())) { dialog("同期できません", dc::err, {"OK"}, 0); return; }
+    if (!dc::start(cfg.token, cfg.channel, skinDir(), capeDir(), animDir())) { dialog("同期できません", dc::err, {"OK"}, 0); return; }
     busyDialog("Discord同期", "チャンネルの画像を取り込んでいます...", false, [] { return dc::st != upd::RUNNING; }, [] { dc::cancel(); },
                [] { return dc::totalN > 0 ? std::to_string((int)dc::nowN) + " / " + std::to_string((int)dc::totalN) + " 枚" : std::string("確認中..."); });
     if (!running) return;
@@ -1144,18 +1176,20 @@ static void actDiscord() {
         else dialog("同期できませんでした", dc::err, {"OK"}, 0);
         return;
     }
-    int total = dc::nSkin + dc::nCape + dc::nBoth;
+    int total = dc::nSkin + dc::nCape + dc::nBoth + dc::nGif + dc::nZip;
     std::string msg;
     if (!total && !dc::nFail && !dc::nSkip) msg = "新しい画像はありませんでした。";
     else {
-        msg = std::to_string(total) + " 枚を保存しました。";
+        msg = std::to_string(total) + " 個を保存しました。";
         if (dc::nSkin) msg += "\nスキン: " + std::to_string(dc::nSkin) + " 枚";
         if (dc::nCape) msg += "\nマント: " + std::to_string(dc::nCape) + " 枚";
+        if (dc::nGif) msg += "\nGIF: " + std::to_string(dc::nGif) + " 個 (anim/ に保存)";
+        if (dc::nZip) msg += "\nZIP: " + std::to_string(dc::nZip) + " 個 (anim/ に保存)";
         if (dc::nBoth) msg += "\n64x32 でどちらか分からない画像: " + std::to_string(dc::nBoth) + " 枚 (スキンにもマントにも入れました)";
-        if (dc::nSkip) msg += "\n使えない大きさの画像: " + std::to_string(dc::nSkip) + " 枚 (64x64 / 64x32 のみ)";
+        if (dc::nSkip) msg += "\n使えないファイル: " + std::to_string(dc::nSkip) + " 個 (PNGは 64x64 / 64x32 のみ・GIF/ZIPは16MBまで)";
         if (dc::nFail) msg += "\n取得に失敗: " + std::to_string(dc::nFail) + " 枚 (もう一度同期すると再挑戦します)";
     }
-    setStatus(total ? "Discordから " + std::to_string(total) + " 枚の画像を保存しました" : "Discord同期: 新しい画像はありません");
+    setStatus(total ? "Discordから " + std::to_string(total) + " 個のファイルを保存しました" : "Discord同期: 新しい画像はありません");
     dialog("Discord同期", msg, {"OK"}, 0);
 }
 
@@ -1298,6 +1332,27 @@ static void drawInfoBar() {
     text(SZ_S, clipText(SZ_S, dst, 1280 - x - 20), 1266, cy, WHITE, 2);
 }
 static void ensureVisible(int& off, int pos, int size, int view) { if (pos < off) off = pos; else if (pos + size > off + view) off = pos + size - view; }
+// ---- プレビュー再生: スキンを 0.1 秒ごとに順に切り替える (マントも、そのスキンの分に変わる) ----
+static int skinCount() { int n = 0; for (auto& a : P.a) if (isSkin(a)) n++; return n; }
+static int skinNumber() { int n = 0; for (int i = 0; i <= sel && i < (int)P.a.size(); i++) if (isSkin(P.a[i])) n++; return n; }
+static void actPlay() {
+    if (playing) { playing = false; setStatus("再生を停止しました"); return; }
+    if (skinCount() < 2) { setStatus("スキンが2つ以上ないと再生できません", true); return; }
+    playing = true; playTick = 0; pane = LIST;
+    setStatus("再生中 (A / B / 左スティック押し込みで停止)");
+}
+static void playStep() {
+    if (!playing) return;
+    uint64_t now = armTicksToNs(armGetSystemTick()) / 1000000ULL;
+    if (playTick && now - playTick < 100) return;
+    playTick = now;
+    int n = (int)P.a.size();
+    for (int k = 1; k <= n; k++) {
+        int i = (sel + k) % n;
+        if (isSkin(P.a[i])) { selectAsset(i); break; }
+    }
+    ensureVisible(listScroll, sel * LIST_ROW, LIST_ROW, LIST_RECT.h);
+}
 
 static void drawSidebar() {
     fill(0, MAIN_Y, SB_W, FOOT_Y - MAIN_Y, SIDE); fill(SB_W - 1, MAIN_Y, 1, FOOT_Y - MAIN_Y, LINE);
@@ -1344,6 +1399,13 @@ static void drawPreview() {
     fill(CT_X, y0, CT_W, h, BG); fill(CT_X, DET_Y - 1, CT_W, 1, LINE);
     fill(CT_X, y0, CT_W, HDR_H, BAR); fill(CT_X, y0 + HDR_H - 1, CT_W, 1, LINE);
     text(SZ_M, "プレビュー", CT_X + 15, y0 + HDR_H / 2, WHITE);
+    {   // 再生 / 停止ボタン (タッチ or 左スティック押し込み)
+        int bx = CT_X + 140, by = y0 + 4, bw = 90, bh = HDR_H - 9;
+        fill(bx, by, bw, bh, playing ? RED : GREEN);
+        text(SZ_S, playing ? "停止" : "再生", bx + bw / 2, by + bh / 2, WHITE, 1);
+        hit(bx, by, bw, bh, [] { actPlay(); });
+        if (skinCount() > 1) text(SZ_S, std::to_string(skinNumber()) + " / " + std::to_string(skinCount()), bx + bw + 12, by + bh / 2, MUTED);
+    }
     if (sel < 0 || sel >= (int)P.a.size()) return;
     const pck::Asset& a = P.a[sel];
     text(SZ_S, a.name, CT_X + CT_W - 15, y0 + HDR_H / 2, MUTED, 2);
@@ -1451,7 +1513,7 @@ static void drawDetails() {
 
 static void drawFooter() {
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
-    const char* hint = pane == LIST ? "↑↓:選択  A:詳細  X:追加  −:保存  Y:ID再抽選  L:メニュー  +:終了"
+    const char* hint = pane == LIST ? "↑↓:選択  A:詳細  X:追加  −:保存  Y:ID再抽選  L:メニュー  左押込:再生  +:終了"
                      : pane == DETAIL ? "↑↓:選択  A:編集  X:ID再抽選/キー編集  Y:削除  −:保存  B:一覧"
                                       : "←→:選択  A:実行  B/L:戻る";
     int hw = textW(SZ_S, hint);
@@ -1529,6 +1591,12 @@ static void handleInput(const Input& in) {
     uint64_t d = in.down;
     bool up = d & HidNpadButton_Up, down = d & HidNpadButton_Down, left = d & HidNpadButton_Left, right = d & HidNpadButton_Right;
     bool a = d & HidNpadButton_A, b = d & HidNpadButton_B, x = d & HidNpadButton_X, y = d & HidNpadButton_Y;
+    if (playing) {   // 再生中は停止だけ受け付ける (+ で終了は可)
+        if (d & HidNpadButton_Plus) { playing = false; actQuit(); return; }
+        if (d & (HidNpadButton_A | HidNpadButton_B | HidNpadButton_StickL)) { playing = false; setStatus("再生を停止しました"); }
+        return;
+    }
+    if (d & HidNpadButton_StickL) { actPlay(); return; }
     if (d & HidNpadButton_Plus) { actQuit(); return; }
     if (d & HidNpadButton_Minus) { actSave(); return; }
     if (d & HidNpadButton_L) { if (pane == MENU) pane = prevPane; else { prevPane = pane; pane = MENU; } return; }
@@ -1614,6 +1682,7 @@ int main(int argc, char** argv) {
         pollInput(in);
         if (bgmDone) { bgmDone = false; bgmNext(); }
         updPoll();
+        playStep();
         handleInput(in);
         drawAll();
         SDL_RenderPresent(R);

@@ -1,4 +1,4 @@
-// Discord のチャンネルに添付された PNG を SD に保存する (Switch 専用: libnx + libcurl)
+// Discord のチャンネルに添付された PNG / GIF / ZIP を SD に保存する (Switch 専用: libnx + libcurl)
 //  - Bot のトークンでチャンネルの最近のメッセージ(100件)を読み、PNG の添付を skins/ capes/ に保存します
 //  - 通信は update.hpp と同じ設定 (HTTPS・証明書を検証) を使います。通信は別スレッドなので画面は止まりません
 //  - 保存した添付の ID は discord_seen.txt に控えます (SD から消した画像を、次の同期でまた取ってくることはありません)
@@ -19,12 +19,13 @@ static std::atomic<int> st{upd::IDLE};          // upd::Phase を流用 (IDLE / 
 static std::atomic<int> nowN{0}, totalN{0};     // 取得の進み具合 (枚数)
 static std::atomic<bool> cancelFlag{false};
 static std::string err;                          // FAILED の後で読む
-static int nSkin = 0, nCape = 0, nBoth = 0, nSkip = 0, nFail = 0;   // DONE の後で読む
-static std::string cfgToken, cfgChannel, dirSkin, dirCape;
+static int nSkin = 0, nCape = 0, nBoth = 0, nSkip = 0, nFail = 0, nGif = 0, nZip = 0;   // DONE の後で読む
+static std::string cfgToken, cfgChannel, dirSkin, dirCape, dirAnim;
 static Thread th;
 static bool thActive = false;
 
-static const size_t MAX_PNG = 1u << 20;         // 1MB 超の添付は取らない (スキンは 32KB 以下が普通)
+static const size_t MAX_PNG = 1u << 20;         // 1MB 超の PNG は取らない (スキンは 32KB 以下が普通)
+static const size_t MAX_ANIM = 16u << 20;      // GIF / ZIP は 16MB まで
 
 static std::string seenPath() { return std::string(util::BASE) + "discord_seen.txt"; }
 
@@ -74,18 +75,19 @@ static void markSeen(const std::string& id) {
 }
 
 // 保存先のファイル名: 元の名前 (日本語はそのまま)。既にあれば末尾に添付IDの下6桁を付ける
-static std::string destPath(const std::string& dir, const std::string& orig, const std::string& attId) {
+static std::string destPathExt(const std::string& dir, const std::string& orig, const std::string& attId, const std::string& ext) {
     std::string name = util::cleanName(orig);
-    if (name.empty() || name.size() > 120) name = "discord_" + attId + ".png";
-    if (!util::isPng(name)) name += ".png";
+    if (name.empty() || name.size() > 120) name = "discord_" + attId + ext;
+    if (!dccore::endsWith(dccore::lowerAscii(name), ext.c_str())) name += ext;
     struct stat sb;
     std::string path = dir + name;
     if (stat(path.c_str(), &sb) == 0) {
         std::string tail = attId.size() > 6 ? attId.substr(attId.size() - 6) : attId;
-        path = dir + name.substr(0, name.size() - 4) + "_" + tail + ".png";
+        path = dir + name.substr(0, name.size() - ext.size()) + "_" + tail + ext;
     }
     return path;
 }
+static std::string destPath(const std::string& dir, const std::string& orig, const std::string& attId) { return destPathExt(dir, orig, attId, ".png"); }
 
 static void syncMain(void*) {
     std::string e;
@@ -107,19 +109,31 @@ static void syncMain(void*) {
     std::set<std::string> seen = loadSeen();
     std::vector<const dccore::Att*> todo;
     for (auto& a : atts) {
-        if (seen.count(a.id) || !dccore::looksPng(a)) continue;
-        if (a.size > MAX_PNG) { markSeen(a.id); nSkip++; continue; }
+        bool png = dccore::looksPng(a), gif = dccore::looksGif(a), zip = dccore::looksZip(a);
+        if (seen.count(a.id) || !(png || gif || zip)) continue;
+        if (a.size > (png ? MAX_PNG : MAX_ANIM)) { markSeen(a.id); nSkip++; continue; }
         todo.push_back(&a);
     }
     totalN = (int)todo.size();
-    util::mkdirs(dirSkin); util::mkdirs(dirCape);
+    util::mkdirs(dirSkin); util::mkdirs(dirCape); util::mkdirs(dirAnim);
 
     for (const dccore::Att* a : todo) {
         if (cancelFlag) { err = "中止しました"; st = upd::FAILED; return; }
         std::string img, em; long ic = 0;
-        bool ok = httpGet(a->url, "", MAX_PNG, img, ic, em) && ic == 200;
+        bool isAnim = !dccore::looksPng(*a);   // GIF / ZIP
+        bool ok = httpGet(a->url, "", isAnim ? MAX_ANIM : MAX_PNG, img, ic, em) && ic == 200;
         if (cancelFlag) { err = "中止しました"; st = upd::FAILED; return; }
         if (!ok) { nFail++; nowN++; continue; }     // 控えないので、次の同期でもう一度取りに行く
+        if (isAnim) {   // GIF / ZIP はそのまま anim/ に保存する
+            bool gif = dccore::looksGif(*a);
+            if (gif ? !dccore::isGifData(img) : !dccore::isZipData(img)) { markSeen(a->id); nSkip++; nowN++; continue; }
+            std::vector<uint8_t> raw(img.begin(), img.end());
+            if (!util::writeAtomic(destPathExt(dirAnim, a->name, a->id, gif ? ".gif" : ".zip"), raw)) { nFail++; nowN++; continue; }
+            markSeen(a->id);
+            if (gif) nGif++; else nZip++;
+            nowN++;
+            continue;
+        }
         std::vector<uint8_t> data(img.begin(), img.end());
         uint32_t w = 0, h = 0;
         dccore::Kind k = pck::pngSize(data, w, h) ? dccore::classify(a->name, w, h) : dccore::SKIP;
@@ -143,17 +157,17 @@ inline void cancel() { cancelFlag = true; }
 inline bool cancelled() { return cancelFlag; }
 
 // 開始できなければ false (理由は err)。update の通信と同時には動かせないので、呼ぶ前に upd::busy() が false になるのを待つこと
-inline bool start(const std::string& token, const std::string& channel, const std::string& skinDir, const std::string& capeDir) {
+inline bool start(const std::string& token, const std::string& channel, const std::string& skinDir, const std::string& capeDir, const std::string& animDir) {
     if (busy()) return false;
     reap();
     std::string t = util::trim(token);
     if (t.compare(0, 4, "Bot ") == 0) t = util::trim(t.substr(4));   // "Bot " を付けて貼っても動くように
     std::string c = util::trim(channel);
     err.clear();
-    nSkin = nCape = nBoth = nSkip = nFail = 0; nowN = 0; totalN = 0; cancelFlag = false;
+    nSkin = nCape = nBoth = nSkip = nFail = nGif = nZip = 0; nowN = 0; totalN = 0; cancelFlag = false;
     if (t.empty() || c.empty()) { err = "config.ini に token と channel を書いてください"; st = upd::FAILED; return false; }
     for (char ch : c) if (ch < '0' || ch > '9') { err = "channel はチャンネルIDの数字だけを書いてください"; st = upd::FAILED; return false; }
-    cfgToken = t; cfgChannel = c; dirSkin = skinDir; dirCape = capeDir;
+    cfgToken = t; cfgChannel = c; dirSkin = skinDir; dirCape = capeDir; dirAnim = animDir;
     st = upd::RUNNING;
     if (R_FAILED(threadCreate(&th, syncMain, nullptr, nullptr, 0x100000, 0x2C, -2))) { err = "通信スレッドを開始できません"; st = upd::FAILED; return false; }
     if (R_FAILED(threadStart(&th))) { threadClose(&th); err = "通信スレッドを開始できません"; st = upd::FAILED; return false; }
