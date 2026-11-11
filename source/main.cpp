@@ -11,13 +11,14 @@
 #include <functional>
 #include <map>
 #include "pck.hpp"
+#include "animcape.hpp"
 #include "skin3d.hpp"
 #include "util.hpp"
 #include "update.hpp"
 #include "discord.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "1.0.1"   // Makefile の APP_VERSION から渡される
+#define APP_VERSION "1.0.2"   // Makefile の APP_VERSION から渡される
 #endif
 static const char* APP_VER = "v" APP_VERSION;
 
@@ -720,7 +721,7 @@ static bool fitsCape(const Img& im) { return im.w == 64 && im.h == 32; }
 static bool anyPng(const Img&) { return true; }
 
 // 一覧から選ぶ (chk を渡すと複数選択: A でチェック / Y で全選択 / X か「決定」で確定)。キャンセルは -1
-static int pickList(const char* title, const std::vector<std::string>& labels, const std::vector<std::string>& subs, std::vector<char>* chk, const std::string& emptyMsg) {
+static int pickList(const char* title, const std::vector<std::string>& labels, const std::vector<std::string>& subs, std::vector<char>* chk, const std::string& emptyMsg, const char* okLabel = "取り込む") {
     int f = 0, scroll = 0, result = -2;
     const int X = 140, Y = 60, W = 1000, H = 600, RH = 48, LX = X + 20, LY = Y + 60, LW = W - 40, LH = 396;
     SDL_Rect area{LX, LY, LW, LH};
@@ -755,9 +756,9 @@ static int pickList(const char* title, const std::vector<std::string>& labels, c
         hit(X + W - 20 - 200, by, 200, 48, [&result] { result = -1; });
         bool anyChk = false; if (chk) for (char c : *chk) if (c) anyChk = true;
         bool okEnabled = chk ? anyChk : n > 0;
-        fill(X + W - 40 - 400, by, 200, 48, okEnabled ? GREEN : LINE); text(SZ_M, chk ? "取り込む" : "決定", X + W - 40 - 300, by + 24, WHITE, 1);
+        fill(X + W - 40 - 400, by, 200, 48, okEnabled ? GREEN : LINE); text(SZ_M, chk ? okLabel : "決定", X + W - 40 - 300, by + 24, WHITE, 1);
         hit(X + W - 40 - 400, by, 200, 48, [&result, &f, okEnabled, chk] { if (okEnabled) result = chk ? -3 : f; });
-        text(SZ_S, chk ? "↑↓:移動  A:チェック  Y:全選択/解除  X:取り込む  B:キャンセル" : "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
+        text(SZ_S, chk ? "↑↓:移動  A:チェック  Y:全選択/解除  X:決定  B:キャンセル" : "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
         if (in.tap) dispatchTap(in.tx, in.ty);
         if (n && (in.down & HidNpadButton_Up)) f = (f + n - 1) % n;
         if (n && (in.down & HidNpadButton_Down)) f = (f + 1) % n;
@@ -897,6 +898,125 @@ static void actRandAll() {
     if (dialog("全スキンIDをランダム化", std::to_string(ids.size()) + " 個のスキンのIDを新しく振り直します。よろしいですか?", {"振り直す", "やめる"}, 1) != 0) return;
     for (int i : ids) { uint32_t id = newUniqueId(); setSkinId(i, id); }
     setStatus(std::to_string(ids.size()) + " 個のスキンIDをランダムにしました");
+}
+// ---------- アニメーションスキン (上級者向け) ----------
+// Animation-Cape-SkinPack-Generator の移植: GIF の各コマを TemplateCapes.png に合成してマントにし、
+// 選んだスキンと 1 コマずつ組み合わせた PCK をエディターに作る (保存は「保存して配置」)
+static std::string animDir() { return std::string(util::BASE) + "anim/"; }
+static bool animProgress(const std::string& title, const std::string& msg, const std::string& sub) {   // false = B でキャンセル
+    if (!appletMainLoop()) { running = false; return false; }
+    Input in; pollInput(in);
+    drawAll();
+    hits.clear();
+    overlay();
+    const int w = 760, h = 230, x = (1280 - w) / 2, y = (720 - h) / 2;
+    fill(x - 2, y - 2, w + 4, h + 4, LINE); fill(x, y, w, h, SIDE);
+    fill(x, y, w, 40, BAR); fill(x, y + 40, w, 1, LINE);
+    text(SZ_M, title, x + 20, y + 20, WHITE);
+    text(SZ_M, clipText(SZ_M, msg, w - 60), x + 30, y + 80, TXT);
+    text(SZ_M, clipText(SZ_M, sub, w - 60), x + w / 2, y + 125, MUTED, 1);
+    text(SZ_S, "B:キャンセル", x + w / 2, y + h - 30, MUTED, 1);
+    SDL_RenderPresent(R);
+    return !(in.down & HidNpadButton_B);
+}
+static bool loadTemplate(std::vector<uint8_t>& px, int& w, int& h) {
+    SDL_Surface* s = IMG_Load("romfs:/TemplateCapes.png");
+    if (!s) return false;
+    SDL_Surface* c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_RGBA32, 0);
+    SDL_FreeSurface(s);
+    if (!c) return false;
+    w = c->w; h = c->h;
+    px.resize((size_t)w * h * 4);
+    for (int y = 0; y < h; y++) memcpy(&px[(size_t)y * w * 4], (const uint8_t*)c->pixels + (size_t)y * c->pitch, (size_t)w * 4);
+    SDL_FreeSurface(c);
+    return true;
+}
+static void actAnimPack() {
+    if (dialog("アニメーションスキンを作成 (上級者向け)",
+               "GIFの各コマをマントにして、選んだスキンと1コマずつ組み合わせたパックを作ります。\nGIFは sd:/switch/nxpckstudio/anim/ に、スキンは skins/ に入れてください。(MP4は非対応)",
+               {"進む", "やめる"}, 0) != 0) return;
+    // ① GIF (なしも選べる = スキンだけのパック)
+    struct G { std::string path, name; size_t size = 0; };
+    std::vector<G> gifs;
+    if (DIR* d = opendir(animDir().c_str())) {
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            if (n.size() < 5) continue;
+            std::string ext = n.substr(n.size() - 4); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+            if (ext != ".gif") continue;
+            G g; g.name = n; g.path = animDir() + n;
+            struct stat st; if (stat(g.path.c_str(), &st) == 0) g.size = (size_t)st.st_size;
+            gifs.push_back(g);
+        }
+        closedir(d);
+    }
+    std::sort(gifs.begin(), gifs.end(), [](const G& a, const G& b) { return anim::naturalLess(a.name, b.name); });
+    std::vector<std::string> gl{"(GIFなし: スキンだけでパックを作る)"}, gs{""};
+    for (auto& g : gifs) { gl.push_back(g.name); gs.push_back(std::to_string(g.size / 1024) + " KB"); }
+    int gi = pickList("アニメーションGIFを選ぶ (anim/ フォルダー)", gl, gs, nullptr, "");
+    if (gi < 0) return;
+    // ② スキン (複数)
+    std::vector<Img> sk;
+    for (auto& im : scanImages(skinDir())) if (fitsSkin(im)) sk.push_back(im);
+    if (sk.empty()) { dialog("スキンがありません", "sd:/switch/nxpckstudio/skins/ に 64x64 / 64x32 のPNGを入れてください。", {"OK"}, 0); return; }
+    std::sort(sk.begin(), sk.end(), [](const Img& a, const Img& b) { return anim::naturalLess(a.name, b.name); });   // skin_2 < skin_10
+    std::vector<std::string> sl, ss;
+    for (auto& im : sk) { sl.push_back(im.name); ss.push_back(std::to_string(im.w) + "x" + std::to_string(im.h)); }
+    std::vector<char> chk(sk.size(), 0);
+    if (pickList("スキンを選ぶ (複数選択・名前の数字順)", sl, ss, &chk, "", "これで作る") < 0) return;
+    std::vector<Img> chosen;
+    for (size_t i = 0; i < sk.size(); i++) if (chk[i]) chosen.push_back(sk[i]);
+    if (chosen.empty()) return;
+    // ③ 名前
+    std::string packName, prefix;
+    if (!keyboard("スキンパックの名前", "", packName, 30) || packName.empty()) return;
+    if (!keyboard("スキン名 (後ろに 01, 02… と番号が付きます)", packName, prefix, 24) || prefix.empty()) return;
+    // ④ GIF → マント
+    std::vector<std::vector<uint8_t>> capes;
+    bool truncated = false;
+    if (gi > 0) {
+        std::vector<uint8_t> tpl; int tw = 0, th = 0;
+        if (!loadTemplate(tpl, tw, th)) { dialog("テンプレートを読めません", "romfs の TemplateCapes.png を読み込めませんでした。", {"OK"}, 0); return; }
+        std::vector<uint8_t> gdata;
+        if (!util::readFile(gifs[gi - 1].path, gdata)) { dialog("読めません", "GIFを読み込めませんでした。", {"OK"}, 0); return; }
+        const size_t MAXF = 300;   // メモリー保護: これ以上のコマは使いません
+        bool cancelled = false;
+        int n = anim::decodeGif(gdata, [&](const uint8_t* px, int w, int h) {
+            if (!animProgress("GIFを変換中", gifs[gi - 1].name, std::to_string(capes.size() + 1) + " コマ目を変換しています...")) { cancelled = true; return false; }
+            if (capes.size() >= MAXF) { truncated = true; return false; }
+            std::vector<uint8_t> frame;
+            anim::encodeFrame(tpl, tw, th, px, w, h, frame);
+            std::vector<uint8_t> cape = anim::capeTexture(frame, tw, th);
+            std::vector<uint8_t> png = anim::encodePng(cape.data(), anim::CAPE_W, anim::CAPE_H);
+            if (png.empty()) { cancelled = true; return false; }
+            capes.push_back(std::move(png));
+            return true;
+        });
+        if (cancelled) { setStatus("変換をキャンセルしました", true); return; }
+        if (n < 0 || capes.empty()) { dialog("読めません", "このGIFを読み込めませんでした。\n壊れているか、対応していない形式です。", {"OK"}, 0); return; }
+    }
+    // ⑤ パックを組み立てる (スキンとマントを 1 対 1 でペアにする。数が違えば少ない方を繰り返す)
+    std::vector<std::vector<uint8_t>> sdata;
+    for (auto& im : chosen) { std::vector<uint8_t> d; if (!readImg(im, d)) return; sdata.push_back(std::move(d)); }
+    size_t pairs = std::max(sdata.size(), capes.size());
+    newPkg(); P.name = packName;
+    lastFolder.clear(); lastFile.clear();
+    uint32_t base = 100000 + rnd() % (99899999 - (uint32_t)pairs + 1);
+    for (size_t i = 0; i < pairs; i++) {
+        std::string ids = pck::pad8(base + (uint32_t)i);
+        char nb[16]; snprintf(nb, sizeof nb, " %02d", (int)(i + 1));
+        std::string name = prefix + nb, capeName = "dlccape" + ids + ".png";
+        pck::Asset s; s.name = "dlcskin" + ids + ".png"; s.type = 0; s.data = sdata[i % sdata.size()];
+        s.props = {{"DISPLAYNAME", name}, {"DISPLAYNAMEID", "IDS_dlcskin" + ids + "_DISPLAYNAME"}, {"ANIM", "0x00040000"}, {"GAME_FLAGS", "0x18"}, {"FREE", "1"}};
+        if (!capes.empty()) s.props.push_back({"CAPEPATH", capeName});
+        P.a.push_back(std::move(s));
+        if (!capes.empty()) { pck::Asset c; c.name = capeName; c.type = 1; c.data = capes[i % capes.size()]; P.a.push_back(std::move(c)); }
+    }
+    sel = 2; detFocus = detScroll = listScroll = 0; pane = LIST; home = false;
+    markDirty();
+    std::string msg = std::to_string(pairs) + " 個のスキン" + (capes.empty() ? "(マントなし)" : "とマントのペア") + "でパックを作りました: " + packName;
+    setStatus(msg);
+    dialog("パックを作りました", msg + (truncated ? "\n※ GIFが長いため最初の300コマだけ使いました。" : "") + "\n\n左の一覧で確認し、「保存して配置」(−ボタン)で書き出してください。", {"OK"}, 0);
 }
 static void actCopyProps(int ai) {
     PckFile f;
@@ -1039,9 +1159,10 @@ static void actDiscord() {
     dialog("Discord同期", msg, {"OK"}, 0);
 }
 
-static const char* HOME_L[3] ={"スキンパックを作成", "既存のPCKを開く", "終了"};
-static const char* HOME_S[3] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "アプリを終了します"};
-static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else actQuit(); }
+static const int HN = 4;   // ホームのボタン数
+static const char* HOME_L[HN] = {"スキンパックを作成", "既存のPCKを開く", "アニメーションスキンを作成(上級者向け)", "終了"};
+static const char* HOME_S[HN] = {"スキン画像を選ぶだけで、すぐにパックが作れます", "SDカード内の .pck を読み込んで編集します", "GIFのコマをマントにして、動くスキンパックを作ります", "アプリを終了します"};
+static void homeAct(int i) { if (i == 0) actCreatePack(); else if (i == 1) actOpenPck(); else if (i == 2) actAnimPack(); else actQuit(); }
 struct MenuItem { const char* label; void (*fn)(); };
 static const MenuItem MENUS[] = {{"ホーム", actHome}, {"スキン追加", actAddSkin}, {"取り込み", actImport}, {"ID再抽選", actRandAll}, {"保存して配置", actSave}, {"BGM", actBgm}, {"更新", actUpdate}, {"Discord", actDiscord}, {"終了", actQuit}};
 static const int NMENU = 9;
@@ -1354,16 +1475,17 @@ static void drawHome() {
         text(SZ_S, "Discord同期 (X)", dx + dw / 2, MENU_H / 2 - 1, WHITE, 1);
         hit(dx, 0, dw, MENU_H, [] { actDiscord(); });
     }
-    text(SZ_L, "NX PCK STUDIO", 640, 120, YEL, 1);
-    text(SZ_S, "Minecraft スキンパック作成ツール", 640, 170, MUTED, 1);
-    for (int i = 0; i < 3; i++) {
-        int bx = 360, by = 215 + i * 125, bw = 560, bh = 105;
+    text(SZ_L, "NX PCK STUDIO", 640, 95, YEL, 1);
+    text(SZ_S, "Minecraft スキンパック作成ツール", 640, 140, MUTED, 1);
+    for (int i = 0; i < HN; i++) {
+        int bw = 720, bx = (1280 - bw) / 2, by = 170 + i * 118, bh = 102;
         bool f = homeFocus == i;
         C col = i == 0 ? (f ? GREEN_HI : GREEN) : (f ? HOVER : LINE);
         fill(bx, by, bw, bh, col);
         if (f) outline(bx - 4, by - 4, bw + 8, bh + 8, YEL, 3);
-        text(SZ_L, HOME_L[i], bx + bw / 2, by + 38, WHITE, 1);
-        text(SZ_S, HOME_S[i], bx + bw / 2, by + 78, i == 0 ? WHITE : MUTED, 1);
+        int lsz = textW(SZ_L, HOME_L[i]) <= bw - 30 ? SZ_L : SZ_M;   // 長い名前は小さい文字にする
+        text(lsz, HOME_L[i], bx + bw / 2, by + 36, WHITE, 1);
+        text(SZ_S, HOME_S[i], bx + bw / 2, by + 76, i == 0 ? WHITE : MUTED, 1);
         hit(bx, by, bw, bh, [i] { homeFocus = i; homeAct(i); });
     }
     fill(0, FOOT_Y, 1280, FOOT_H, BAR); fill(0, FOOT_Y, 1280, 1, LINE);
@@ -1385,8 +1507,8 @@ static void handleInput(const Input& in) {
     if (home) {
         uint64_t hd = in.down;
         if (hd & HidNpadButton_Plus) { actQuit(); return; }
-        if (hd & HidNpadButton_Up) homeFocus = (homeFocus + 2) % 3;
-        if (hd & HidNpadButton_Down) homeFocus = (homeFocus + 1) % 3;
+        if (hd & HidNpadButton_Up) homeFocus = (homeFocus + HN - 1) % HN;
+        if (hd & HidNpadButton_Down) homeFocus = (homeFocus + 1) % HN;
         if (hd & HidNpadButton_A) homeAct(homeFocus);
         if (hd & HidNpadButton_X) actDiscord();
         if (hd & HidNpadButton_Y) actUpdate();
@@ -1463,6 +1585,7 @@ int main(int argc, char** argv) {
     util::mkdirs(util::BASE);
     util::mkdirs(skinDir());
     util::mkdirs(capeDir());
+    util::mkdirs(animDir());
     util::mkdirs(std::string(util::BASE) + "pck/");
     util::mkdirs(std::string(util::BASE) + "bgm/");
     cfg = util::loadConfig();
