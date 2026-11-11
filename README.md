@@ -9,7 +9,7 @@
 
 PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植したもので、GPL-3.0 です。
 
-- 作者: cokacolastic / バージョン: 1.0.1
+- 作者: cokacolastic / バージョン: 1.0.2
 
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
@@ -18,6 +18,20 @@ PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植した�
 4. 一覧でアセットを選び、右下の「アセット詳細」で名前・テーマ名・スキンID・モデル・マント・プロパティ(キー/値の編集・追加・削除)を変更。
 5. 「保存して配置」→ ① パックのフォルダー名 ② PCKファイル名 を入力すると、上の場所に書き出します。
 6. ゲームを再起動。
+
+## アニメーションスキン (上級者向け)
+ホーム画面の「アニメーションスキンを作成(上級者向け)」は、Animation-Cape-SkinPack-Generator をこのアプリに移植したものです。
+GIF の各コマを `TemplateCapes.png` に合成してマントにし、選んだスキンと **1コマずつ** 組み合わせたパックを作ります。
+
+1. アニメーションの GIF を `sd:/switch/nxpckstudio/anim/` に、スキン(64x64 / 64x32)の PNG を `skins/` に入れる。
+2. ホーム →「アニメーションスキンを作成(上級者向け)」→ GIF を選ぶ(「GIFなし」ならスキンだけのパック)→ スキンを複数選ぶ(名前の数字順 `skin_2` < `skin_10`)。
+3. パック名とスキン名(後ろに `01`, `02`… が付きます)を入力すると、エディターにパックができます。
+4. 「保存して配置」(−)で書き出す。
+
+- スキンとマントの数が違うときは、少ない方を繰り返して多い方に合わせます。
+- 各コマは PNG が 35KB 以下になるまで自動で縮小します。マントの画像は 384x192 です。
+- GIF は先頭の 300 コマまで使います(メモリー保護)。MP4 は Switch 上では読めないため非対応です (PC で GIF に変換してください)。
+- PC での確認用に `tests/test_anim.cpp` (GIF → マント PNG) があります。
 
 ## 操作 (ボタン / タッチどちらも可)
 | 場所 | 操作 |
@@ -40,9 +54,9 @@ GitHub の「最新リリース」を見つけて、アプリの中だけで更�
 - 更新を探す場所は `config.ini` の `update_repo=<ユーザー名>/<リポジトリ名>` です (既定: `cokacolastic/NX-PCK-Studio`)。
 
 ### 新しい版を出す手順
-    git tag v1.0.1
-    git push origin v1.0.1
-GitHub Actions がビルドして Release を作り、`nxpckstudio.nro` を添付します。アプリのバージョンもタグ (`1.0.1`) になります。
+    git tag v1.0.2
+    git push origin v1.0.2
+GitHub Actions がビルドして Release を作り、`nxpckstudio.nro` を添付します。アプリのバージョンもタグ (`1.0.2`) になります。
 普段の push はビルドだけで、Release は作りません。
 
 ## アイコン

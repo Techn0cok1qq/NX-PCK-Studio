@@ -8,7 +8,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET      := nxpckstudio
 APP_TITLE   := NX PCK Studio
 APP_AUTHOR  := cokacolastic
-APP_VERSION := 1.0.1
+APP_VERSION := 1.0.2
 ROMFS       := romfs
 ICON        := icon.jpg
 
@@ -27,7 +27,7 @@ CURLLIBS := $(shell $(PKGCONF) --libs --static libcurl 2>/dev/null)
 ifeq ($(strip $(CURLLIBS)),)
 CURLLIBS := -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz
 endif
-LIBS     := $(shell $(PKGCONF) --libs --static SDL2_image SDL2_ttf SDL2_mixer sdl2) $(CURLLIBS) -lnx
+LIBS     := $(shell $(PKGCONF) --libs --static SDL2_image SDL2_ttf SDL2_mixer sdl2) $(CURLLIBS) -lz -lnx
 
 CXX := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-g++
 OBJS := $(patsubst source/%.cpp,build/%.o,$(wildcard source/*.cpp))
