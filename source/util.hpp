@@ -75,7 +75,7 @@ struct Config {
     std::string token, channel;
     bool little = true;                           // endian=little|big
     bool bgm = true;                              // bgm=on|off
-    std::string repo = "cokacolastic/NX-PCK-Studio";  // update_repo=<owner>/<repo> (更新を探す GitHub リポジトリ)
+    std::string repo = "Techn0cok1qq/NX-PCK-Studio";  // update_repo=<owner>/<repo> (更新を探す GitHub リポジトリ)
     bool updCheck = true;                         // update_check=on|off (起動時の自動確認)
 };
 
