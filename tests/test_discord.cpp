@@ -37,6 +37,13 @@ int main() {
     Att t; t.name = "noext"; t.type = "image/png"; assert(looksPng(t));
     t.name = "x.jpg"; t.type = "image/jpeg"; assert(!looksPng(t));
 
+    // GIF / ZIP の添付 (アニメーションスキン用)
+    Att g; g.name = "Anim.GIF"; assert(looksGif(g) && !looksPng(g) && !looksZip(g));
+    g.name = "x"; g.type = "image/gif"; assert(looksGif(g));
+    Att zp; zp.name = "skins.ZIP"; assert(looksZip(zp) && !looksGif(zp));
+    zp.name = "x"; zp.type = "application/x-zip-compressed"; assert(looksZip(zp));
+    assert(isGifData("GIF89a....") && !isGifData("<html>...") && isZipData(std::string("PK\x03\x04") + std::string(30, 'x')) && !isZipData("hello"));
+
     // 壊れた / 想定外の応答
     assert(!parseMessages(R"({"message":"401: Unauthorized","code":0})", a));
     assert(!parseMessages("<html>", a));
