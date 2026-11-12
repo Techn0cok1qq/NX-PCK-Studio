@@ -9,7 +9,7 @@
 
 PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植したもので、GPL-3.0 です。
 
-- 作者: cokacolastic / バージョン: 1.0.2
+
 
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
