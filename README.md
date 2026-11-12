@@ -9,8 +9,6 @@
 
 PCKの書き出しは Web PCK Editor / PCK-studio-Web の処理を移植したもので、GPL-3.0 です。
 
-
-
 ## 使い方
 1. `nxpckstudio.nro` を `sd:/switch/` に置いて起動(初回に `sd:/switch/nxpckstudio/` が作られ、サンプル画像が `images/` に入ります)。
 2. 自分のスキン(64x64 / 64x32)のPNGを `sd:/switch/nxpckstudio/skins/` に、マント(64x32)のPNGを `capes/` に入れる。
