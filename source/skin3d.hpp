@@ -1,5 +1,6 @@
 // 3Dスキンプレビュー。PCK-studio-Web の Skin3D(2Dキャンバス描画)を SDL_RenderGeometry に移植したもの。
 // 標準パーツ + BOX / OFFSET プロパティ + 第2レイヤー + マントに対応。正射影で回転・俯仰・拡大縮小。
+// 128 / 256 / 512 の大きなスキンも、UV は 64 を基準にした 0〜1 の座標なのでそのまま貼れる。
 #pragma once
 #include <SDL.h>
 #include <algorithm>
@@ -156,6 +157,11 @@ inline void draw(SDL_Renderer* R, SDL_Texture* skin, uint32_t sw, uint32_t sh, S
     Model m = build(props, legacy, cape != nullptr);
     SDL_SetTextureBlendMode(skin, SDL_BLENDMODE_BLEND);
     if (cape) SDL_SetTextureBlendMode(cape, SDL_BLENDMODE_BLEND);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    // 128〜512 の大きなスキンは小さく描くので、なめらかに縮小する。64 のドット絵はそのまま
+    SDL_SetTextureScaleMode(skin, sw > 64 ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    if (cape) SDL_SetTextureScaleMode(cape, SDL_ScaleModeNearest);
+#endif
 
     float cy_ = cosf(yaw), sy_ = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
     float scale = std::min(area.h / 38.f, area.w / 26.f) * zoom;

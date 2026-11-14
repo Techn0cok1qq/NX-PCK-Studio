@@ -19,7 +19,7 @@
 #include "discord.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "1.0.2"   // Makefile の APP_VERSION から渡される
+#define APP_VERSION "1.0.3"   // Makefile の APP_VERSION から渡される
 #endif
 static const char* APP_VER = "v" APP_VERSION;
 
@@ -258,18 +258,56 @@ static SDL_Texture* assetTex(const std::vector<uint8_t>& d) {
     h ^= d.size();
     auto it = atex.find(h);
     if (it != atex.end()) return it->second;
-    if (atex.size() > 160) { for (auto& kv : atex) if (kv.second) SDL_DestroyTexture(kv.second); atex.clear(); }
     SDL_Texture* t = IMG_LoadTexture_RW(R, SDL_RWFromConstMem(d.data(), (int)d.size()), 1);
     atex[h] = t;
     return t;
 }
-static void drawTex(SDL_Texture* t, uint32_t w, uint32_t h, int x, int y, int bw, int bh) {  // 整数倍でドット絵のまま拡大
-    if (!t || !w || !h) return;
-    int s = std::max(1, (int)std::min(bw / w, bh / h));
-    SDL_Rect d{x + (bw - (int)w * s) / 2, y + (bh - (int)h * s) / 2, (int)w * s, (int)h * s};
+// 1フレームの最初に呼ぶ: テクスチャが増えすぎていたら捨てる (描画の途中で捨てると、手に持っているテクスチャが消えるため)
+static void trimTextures() {
+    if (atex.size() > 160) { for (auto& kv : atex) if (kv.second) SDL_DestroyTexture(kv.second); atex.clear(); }
+    if (imgCache.size() > 24) clearImgCache();   // 512x512 は 1MB ほどあるので、多めには持たない
+}
+// 枠 (bw x bh) に収まる大きさで画像を描く。小さい画像は整数倍でドット絵のまま拡大、大きい画像 (128〜512) は収まるまで縮小。描いた範囲を返す
+static SDL_Rect drawImgFit(SDL_Texture* t, uint32_t w, uint32_t h, int x, int y, int bw, int bh) {
+    SDL_Rect d{x, y, 0, 0};
+    if (!t || !w || !h || bw < 1 || bh < 1) return d;
+    float sc = std::min((float)bw / (float)w, (float)bh / (float)h);
+    if (sc >= 1.f) sc = (float)(int)sc;
+    int dw = std::max(1, (int)((float)w * sc)), dh = std::max(1, (int)((float)h * sc));
+    d = SDL_Rect{x + (bw - dw) / 2, y + (bh - dh) / 2, dw, dh};
     for (int yy = 0; yy < d.h; yy += 16)  // 透過が分かる市松模様
         for (int xx = 0; xx < d.w; xx += 16) fill(d.x + xx, d.y + yy, std::min(16, d.w - xx), std::min(16, d.h - yy), ((xx + yy) / 16) % 2 ? C{0x3a, 0x3a, 0x3a} : C{0x30, 0x30, 0x30});
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(t, sc < 1.f ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
     SDL_RenderCopy(R, t, nullptr, &d);
+    return d;
+}
+static void drawTex(SDL_Texture* t, uint32_t w, uint32_t h, int x, int y, int bw, int bh) { drawImgFit(t, w, h, x, y, bw, bh); }
+
+// 展開図: 画像を枠に収めて描き、頭・胴・腕・脚の位置の枠を重ねる (標準のスキンの並び。64 を基準にした座標)
+struct PartBox { int u, v, w, h; const char* label; bool second, legacy; };
+static const PartBox PARTS[] = {
+    {0, 0, 32, 16, "頭", false, true},   {32, 0, 32, 16, "帽", true, true},
+    {16, 16, 24, 16, "胴", false, true}, {16, 32, 24, 16, "", true, false},
+    {40, 16, 16, 16, "右腕", false, true}, {40, 32, 16, 16, "", true, false},
+    {0, 16, 16, 16, "右脚", false, true},  {0, 32, 16, 16, "", true, false},
+    {16, 48, 16, 16, "左脚", false, false}, {0, 48, 16, 16, "", true, false},
+    {32, 48, 16, 16, "左腕", false, false}, {48, 48, 16, 16, "", true, false},
+};
+static void drawUnfold(SDL_Texture* t, uint32_t w, uint32_t h, int x, int y, int bw, int bh, bool grid) {
+    SDL_Rect d = drawImgFit(t, w, h, x, y, bw, bh);
+    if (!t || !grid || d.w < 1) return;
+    bool legacy = (h * 2 == w);   // 64x32 形式は右側の腕・脚だけで、第2層も無い
+    float u = (float)d.w / 64.f;  // 64 を基準にした座標 → 画面の長さ (128〜512 も同じ並びで拡大されている)
+    SDL_RenderSetClipRect(R, &d);
+    for (const PartBox& p : PARTS) {
+        if (legacy && !p.legacy) continue;
+        int px = d.x + (int)(p.u * u), py = d.y + (int)(p.v * u), pw = (int)(p.w * u), ph = (int)(p.h * u);
+        outline(px, py, pw, ph, p.second ? C{0x55, 0xff, 0xff, 170} : C{0xff, 0xff, 0x55, 210}, 1);
+        if (*p.label) { text(SZ_S, p.label, px + pw / 2 + 1, py + ph / 2 + 1, C{0, 0, 0}, 1); text(SZ_S, p.label, px + pw / 2, py + ph / 2, YEL, 1); }
+    }
+    SDL_RenderSetClipRect(R, nullptr);
 }
 static std::string imgDir() { return std::string(util::BASE) + "images/"; }   // 旧フォルダー (起動時に skins/ capes/ へ移す)
 static std::string skinDir() { return std::string(util::BASE) + "skins/"; }
@@ -661,14 +699,52 @@ static int dialog(const std::string& title, const std::string& msg, std::vector<
     return result;
 }
 
-// 画像選択ダイアログ
-static bool pickImage(const char* title, const std::string& dir, std::function<bool(const Img&)> ok, Img& out) {
-    clearImgCache();
-    std::vector<Img> list;
-    for (auto& im : scanImages(dir)) if (ok(im)) list.push_back(im);
+// ---------- スキンの展開図 + 3Dプレビュー (画像選択 / 取り込みの両方で使う) ----------
+static bool showGrid = true;                      // 展開図に頭・胴・腕・脚の枠を重ねる (L / 展開図をタッチで切り替え)
+static const std::vector<pck::Prop> NO_PROPS;
+static SDL_Rect unfoldRect(SDL_Rect r) { return SDL_Rect{r.x, r.y, r.w * 36 / 100, r.h}; }
+static SDL_Rect view3dRect(SDL_Rect r) { SDL_Rect u = unfoldRect(r); return SDL_Rect{r.x + u.w + 8, r.y, r.w - u.w - 8, r.h}; }
+static std::string sizeStr(size_t n) { return n >= 10240 ? std::to_string((n + 512) / 1024) + " KB" : std::to_string(n) + " bytes"; }
+// r の左に展開図、右に3Dプレビューを描く。line1 / line2 は展開図の下の説明 (line2 は col の色)
+static void drawSkinPreview(SDL_Texture* skin, uint32_t w, uint32_t h, SDL_Texture* cape, const std::vector<pck::Prop>& props,
+                            SDL_Rect r, const std::string& line1, const std::string& line2, C col2) {
+    SDL_Rect ur = unfoldRect(r), vr = view3dRect(r);
+    fill(ur.x, ur.y, ur.w, ur.h, BG);
+    text(SZ_S, "展開図", ur.x + 10, ur.y + 16, MUTED);
+    text(SZ_S, showGrid ? "枠 ON" : "枠 OFF", ur.x + ur.w - 10, ur.y + 16, MUTED, 2);
+    if (skin) drawUnfold(skin, w, h, ur.x + 4, ur.y + 32, ur.w - 8, ur.h - 32 - 56, showGrid);
+    else text(SZ_S, "読み込めません", ur.x + ur.w / 2, ur.y + ur.h / 2, RED_HI, 1);
+    text(SZ_S, clipText(SZ_S, line1, ur.w - 8), ur.x + ur.w / 2, ur.y + ur.h - 38, TXT, 1);
+    text(SZ_S, clipText(SZ_S, line2, ur.w - 8), ur.x + ur.w / 2, ur.y + ur.h - 16, col2, 1);
+    outline(ur.x, ur.y, ur.w, ur.h, LINE, 1);
+    hit(ur.x, ur.y, ur.w, ur.h, [] { showGrid = !showGrid; });
+    fill(vr.x, vr.y, vr.w, vr.h, C{0x22, 0x22, 0x22});
+    if (skin) skin3d::draw(R, skin, w, h, cape, props, SDL_Rect{vr.x + 1, vr.y + 26, vr.w - 2, vr.h - 26 - 26}, yaw3d, pitch3d, zoom3d);
+    text(SZ_S, "3Dプレビュー", vr.x + 10, vr.y + 16, MUTED);
+    text(SZ_S, clipText(SZ_S, "ドラッグ/右スティック:回転  R:自動回転  ZL/ZR:拡大縮小", vr.w - 12), vr.x + vr.w / 2, vr.y + vr.h - 13, MUTED, 1);
+    outline(vr.x, vr.y, vr.w, vr.h, LINE, 1);
+    hit(vr.x, vr.y, vr.w, vr.h, [] { autoRot = !autoRot; });
+}
+// ダイアログの中の3Dプレビューの操作 (ドラッグ / 右スティック / R / ZL ZR) と L (展開図の枠)
+static void previewControls(const Input& in, SDL_Rect r) {
+    SDL_Rect v = view3dRect(r);
+    bool inV = in.sx >= v.x && in.sx < v.x + v.w && in.sy >= v.y && in.sy < v.y + v.h;
+    if (inV && (in.dragDx || in.dragDy)) { yaw3d -= in.dragDx * 0.012f; pitch3d = std::max(-1.2f, std::min(1.2f, pitch3d + in.dragDy * 0.008f)); autoRot = false; }
+    if (std::abs(in.stx) > 6000) { yaw3d += in.stx / 32767.f * 0.05f; autoRot = false; }
+    if (std::abs(in.sty) > 6000) pitch3d = std::max(-1.2f, std::min(1.2f, pitch3d - in.sty / 32767.f * 0.03f));
+    if (autoRot) yaw3d += 0.01f;
+    if (in.down & HidNpadButton_R) autoRot = !autoRot;
+    if (in.down & HidNpadButton_ZR) zoom3d = std::min(2.5f, zoom3d + 0.15f);
+    if (in.down & HidNpadButton_ZL) zoom3d = std::max(0.5f, zoom3d - 0.15f);
+    if (in.down & HidNpadButton_L) showGrid = !showGrid;
+}
+
+// 画像選択ダイアログ。skinPv = true なら、右に展開図と3Dプレビューを出す (スキン用)。選んだら true
+static bool pickImageFrom(const char* title, const std::vector<Img>& list, bool skinPv, const std::string& emptyHint, Img& out, const char* okLabel = "決定") {
     int f = 0, scroll = 0, result = -2;
-    const int X = 90, Y = 60, W = 1100, H = 600, RH = 44, LX = X + 20, LY = Y + 60, LW = 600, LH = 396;
+    const int X = skinPv ? 50 : 90, Y = 60, W = skinPv ? 1180 : 1100, H = 600, RH = 44, LX = X + 20, LY = Y + 60, LW = skinPv ? 360 : 600, LH = 396;
     SDL_Rect area{LX, LY, LW, LH};
+    SDL_Rect PR{LX + LW + 10, LY, X + W - 20 - (LX + LW + 10), 450};
     while (result == -2) {
         if (!appletMainLoop()) { running = false; return false; }
         Input in; pollInput(in);
@@ -681,7 +757,7 @@ static bool pickImage(const char* title, const std::string& dir, std::function<b
         int n = (int)list.size();
         if (!n) {
             text(SZ_M, "該当する画像がありません", LX, LY + 20, TXT);
-            text(SZ_S, "sd:/" + dir.substr(6) + " に PNG を入れてください", LX, LY + 60, MUTED);
+            if (!emptyHint.empty()) text(SZ_S, emptyHint, LX, LY + 60, MUTED);
         }
         if (in.dragDy && in.sx >= LX && in.sx < LX + LW && in.sy >= LY && in.sy < LY + LH) scroll -= in.dragDy;
         scroll = std::max(0, std::min(scroll, std::max(0, n * RH - LH)));
@@ -691,23 +767,34 @@ static bool pickImage(const char* title, const std::string& dir, std::function<b
             if (ry + RH < LY || ry > LY + LH) continue;
             fill(LX, ry, LW, RH - 4, i == f ? SELBG : BG);
             if (i == f) fill(LX, ry, 4, RH - 4, GREEN);
-            text(SZ_M, clipText(SZ_M, list[i].name, 440), LX + 14, ry + RH / 2 - 2, i == f ? YEL : TXT);
-            text(SZ_S, std::to_string(list[i].w) + "x" + std::to_string(list[i].h), LX + LW - 10, ry + RH / 2 - 2, MUTED, 2);
+            text(SZ_M, clipText(SZ_M, list[i].name, skinPv ? LW - 110 : 440), LX + 14, ry + RH / 2 - 2, i == f ? YEL : TXT);
+            text(SZ_S, std::to_string(list[i].w) + "x" + std::to_string(list[i].h), LX + LW - 10, ry + RH / 2 - 2, list[i].w > 64 ? CYAN : MUTED, 2);
             hitIn(area, LX, ry, LW, RH - 4, [&f, &result, i] { if (f == i) result = i; else f = i; });
         }
         SDL_RenderSetClipRect(R, nullptr);
-        fill(X + 660, LY, 420, LH, BG); outline(X + 660, LY, 420, LH, LINE, 1);
-        if (n) {
-            const Img& im = list[f];
-            drawTex(imgTex(im.path), im.w, im.h, X + 670, LY + 10, 400, LH - 60);
-            text(SZ_S, std::to_string(im.w) + "x" + std::to_string(im.h) + "  " + std::to_string(im.size) + " bytes" + (im.size > 0x7FFF ? "  (32767超)" : ""), X + 870, LY + LH - 24, im.size > 0x7FFF ? RED_HI : MUTED, 1);
+        if (skinPv) {
+            if (n) {
+                const Img& im = list[f];
+                std::string l1 = std::to_string(im.w) + "x" + std::to_string(im.h) + "  " + sizeStr(im.size), l2;
+                C c2 = MUTED;
+                if (im.size > 0x7FFF) { l2 = "32767バイト超 (落ちる恐れ)"; c2 = RED_HI; }
+                drawSkinPreview(imgTex(im.path), im.w, im.h, nullptr, NO_PROPS, PR, l1, l2, c2);
+            } else { fill(PR.x, PR.y, PR.w, PR.h, BG); outline(PR.x, PR.y, PR.w, PR.h, LINE, 1); }
+            previewControls(in, PR);
+        } else {
+            fill(X + 660, LY, 420, LH, BG); outline(X + 660, LY, 420, LH, LINE, 1);
+            if (n) {
+                const Img& im = list[f];
+                drawTex(imgTex(im.path), im.w, im.h, X + 670, LY + 10, 400, LH - 60);
+                text(SZ_S, std::to_string(im.w) + "x" + std::to_string(im.h) + "  " + std::to_string(im.size) + " bytes" + (im.size > 0x7FFF ? "  (32767超)" : ""), X + 870, LY + LH - 24, im.size > 0x7FFF ? RED_HI : MUTED, 1);
+            }
         }
         int by = Y + H - 24 - 48;
         fill(X + W - 20 - 200, by, 200, 48, LINE); text(SZ_M, "キャンセル", X + W - 120, by + 24, WHITE, 1);
         hit(X + W - 20 - 200, by, 200, 48, [&result] { result = -1; });
-        fill(X + W - 40 - 400, by, 200, 48, n ? GREEN : LINE); text(SZ_M, "決定", X + W - 40 - 300, by + 24, WHITE, 1);
+        fill(X + W - 40 - 400, by, 200, 48, n ? GREEN : LINE); text(SZ_M, okLabel, X + W - 40 - 300, by + 24, WHITE, 1);
         hit(X + W - 40 - 400, by, 200, 48, [&result, &f, n] { if (n) result = f; });
-        text(SZ_S, "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
+        text(SZ_S, skinPv ? clipText(SZ_S, "↑↓:選択  A:決定  B:戻る  L:枠線  R:自動回転  ZL/ZR:拡大  右スティック:向き", 700) : "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
         if (in.tap) dispatchTap(in.tx, in.ty);
         if (n && (in.down & HidNpadButton_Up)) f = (f + n - 1) % n;
         if (n && (in.down & HidNpadButton_Down)) f = (f + 1) % n;
@@ -719,15 +806,23 @@ static bool pickImage(const char* title, const std::string& dir, std::function<b
     if (result >= 0 && result < (int)list.size()) { out = list[result]; return true; }
     return false;
 }
-static bool fitsSkin(const Img& im) { return im.w == 64 && (im.h == 64 || im.h == 32); }
+static bool pickImage(const char* title, const std::string& dir, std::function<bool(const Img&)> ok, Img& out, bool skinPv = false) {
+    clearImgCache();
+    std::vector<Img> list;
+    for (auto& im : scanImages(dir)) if (ok(im)) list.push_back(im);
+    return pickImageFrom(title, list, skinPv, "sd:/" + dir.substr(6) + " に PNG を入れてください", out);
+}
+static bool fitsSkin(const Img& im) { return dccore::isSkinSize(im.w, im.h); }   // 64x64 / 64x32、128・256・512 (そのまま使う)
 static bool fitsCape(const Img& im) { return im.w == 64 && im.h == 32; }
 static bool anyPng(const Img&) { return true; }
 
 // 一覧から選ぶ (chk を渡すと複数選択: A でチェック / Y で全選択 / X か「決定」で確定)。キャンセルは -1
-static int pickList(const char* title, const std::vector<std::string>& labels, const std::vector<std::string>& subs, std::vector<char>* chk, const std::string& emptyMsg, const char* okLabel = "取り込む") {
+// pv を渡すと、右側に選んでいる行のプレビュー (展開図 + 3D) を出す。pv(行の番号, 描く範囲)
+static int pickList(const char* title, const std::vector<std::string>& labels, const std::vector<std::string>& subs, std::vector<char>* chk, const std::string& emptyMsg, const char* okLabel = "取り込む", std::function<void(int, SDL_Rect)> pv = nullptr) {
     int f = 0, scroll = 0, result = -2;
-    const int X = 140, Y = 60, W = 1000, H = 600, RH = 48, LX = X + 20, LY = Y + 60, LW = W - 40, LH = 396;
+    const int X = pv ? 40 : 140, Y = 60, W = pv ? 1200 : 1000, H = 600, RH = 48, LX = X + 20, LY = Y + 60, LW = pv ? 480 : W - 40, LH = 396;
     SDL_Rect area{LX, LY, LW, LH};
+    SDL_Rect PR{LX + LW + 10, LY, X + W - 20 - (LX + LW + 10), 450};
     int n = (int)labels.size();
     while (result == -2) {
         if (!appletMainLoop()) { running = false; return -1; }
@@ -749,11 +844,15 @@ static int pickList(const char* title, const std::vector<std::string>& labels, c
             if (i == f) fill(LX, ry, 4, RH - 4, GREEN);
             int tx = LX + 14;
             if (chk) { text(SZ_M, (*chk)[i] ? "■" : "□", LX + 14, ry + RH / 2 - 2, (*chk)[i] ? YEL : MUTED); tx += 40; }
-            text(SZ_M, clipText(SZ_M, labels[i], 560), tx, ry + RH / 2 - 2, i == f ? YEL : TXT);
-            if (i < (int)subs.size()) text(SZ_S, clipText(SZ_S, subs[i], 300), LX + LW - 10, ry + RH / 2 - 2, MUTED, 2);
+            text(SZ_M, clipText(SZ_M, labels[i], pv ? LW - 14 - (chk ? 40 : 0) - 170 : 560), tx, ry + RH / 2 - 2, i == f ? YEL : TXT);
+            if (i < (int)subs.size()) text(SZ_S, clipText(SZ_S, subs[i], pv ? 160 : 300), LX + LW - 10, ry + RH / 2 - 2, MUTED, 2);
             hitIn(area, LX, ry, LW, RH - 4, [&f, &result, chk, i] { if (chk) { f = i; (*chk)[i] = !(*chk)[i]; } else if (f == i) result = i; else f = i; });
         }
         SDL_RenderSetClipRect(R, nullptr);
+        if (pv) {
+            if (n) pv(f, PR); else { fill(PR.x, PR.y, PR.w, PR.h, BG); outline(PR.x, PR.y, PR.w, PR.h, LINE, 1); }
+            previewControls(in, PR);
+        }
         int by = Y + H - 24 - 48;
         fill(X + W - 20 - 200, by, 200, 48, LINE); text(SZ_M, "キャンセル", X + W - 120, by + 24, WHITE, 1);
         hit(X + W - 20 - 200, by, 200, 48, [&result] { result = -1; });
@@ -761,7 +860,8 @@ static int pickList(const char* title, const std::vector<std::string>& labels, c
         bool okEnabled = chk ? anyChk : n > 0;
         fill(X + W - 40 - 400, by, 200, 48, okEnabled ? GREEN : LINE); text(SZ_M, chk ? okLabel : "決定", X + W - 40 - 300, by + 24, WHITE, 1);
         hit(X + W - 40 - 400, by, 200, 48, [&result, &f, okEnabled, chk] { if (okEnabled) result = chk ? -3 : f; });
-        text(SZ_S, chk ? "↑↓:移動  A:チェック  Y:全選択/解除  X:決定  B:キャンセル" : "↑↓:選択  A:決定  B:キャンセル", X + 20, by + 24, MUTED);
+        text(SZ_S, clipText(SZ_S, chk ? (pv ? "↑↓:移動  A:チェック  Y:全選択  X:決定  B:戻る  L:枠線  R:自動回転  ZL/ZR:拡大" : "↑↓:移動  A:チェック  Y:全選択/解除  X:決定  B:キャンセル")
+                                      : (pv ? "↑↓:選択  A:決定  B:戻る  L:枠線  R:自動回転  ZL/ZR:拡大" : "↑↓:選択  A:決定  B:キャンセル"), 700), X + 20, by + 24, MUTED);
         if (in.tap) dispatchTap(in.tx, in.ty);
         if (n && (in.down & HidNpadButton_Up)) f = (f + n - 1) % n;
         if (n && (in.down & HidNpadButton_Down)) f = (f + 1) % n;
@@ -824,7 +924,7 @@ static void splitLabel(const PckFile& f, std::string& folder, std::string& file)
 // ---------- 操作 (メニュー / 詳細から呼ぶ) ----------
 static void actAddSkin() {
     Img im;
-    if (!pickImage("スキン画像を選ぶ (64x64 / 64x32)", skinDir(), fitsSkin, im)) return;
+    if (!pickImage("スキン画像を選ぶ (64x64 / 64x32 / 128〜512)", skinDir(), fitsSkin, im, true)) return;
     std::string base = im.name.substr(0, im.name.size() - 4), name;
     if (!keyboard("スキン名", base, name, 30) || name.empty()) return;
     addSkin(im, name);
@@ -890,7 +990,19 @@ static void actImport() {
         subs.push_back(skinIds(src[i]) + (getProp(src[i], "CAPEPATH").empty() ? "" : "  +マント"));
     }
     std::vector<char> chk(idx.size(), 0);
-    if (pickList("取り込むスキンを選ぶ", labels, subs, &chk, "このPCKにスキンがありません") < 0) return;
+    auto pv = [&src, &idx](int k, SDL_Rect r) {   // 選んでいるスキンの展開図 + 3Dプレビュー (BOX / OFFSET プロパティやマントも反映)
+        const pck::Asset& sk = src[idx[k]];
+        uint32_t w = 0, h = 0, cw = 0, ch = 0;
+        const pck::Asset* cape = nullptr;
+        std::string cp = getProp(sk, "CAPEPATH");
+        if (!cp.empty()) for (auto& x : src) if (x.name == cp && pck::pngSize(x.data, cw, ch)) cape = &x;
+        bool ok = pck::pngSize(sk.data, w, h);
+        std::string l1 = ok ? std::to_string(w) + "x" + std::to_string(h) + "  " + sizeStr(sk.data.size()) : "";
+        bool big = sk.data.size() > 0x7FFF;
+        drawSkinPreview(ok ? assetTex(sk.data) : nullptr, w, h, cape ? assetTex(cape->data) : nullptr, sk.props, r, l1,
+                        big ? "32767バイト超 (落ちる恐れ)" : (cape ? "マントあり" : ""), big ? RED_HI : MUTED);
+    };
+    if (pickList("取り込むスキンを選ぶ (展開図 / 3Dプレビュー)", labels, subs, &chk, "このPCKにスキンがありません", "取り込む", pv) < 0) return;
     int cnt = 0;
     for (size_t k = 0; k < idx.size(); k++) if (chk[k]) { importSkin(src[idx[k]], src); cnt++; }
     if (cnt) { sel = (int)P.a.size() - 1; markDirty(); setStatus(std::to_string(cnt) + " 個のスキンを取り込みました"); }
@@ -1155,6 +1267,22 @@ static void updPoll() {
 }
 
 // ---------- Discord 同期 (チャンネルに貼られた PNG を skins/ capes/ に保存) ----------
+// 今回取り込んだスキンを、展開図と3Dプレビューで見て回る (見るだけ。スキンへの追加は「スキン追加」から)
+static void reviewNewSkins() {
+    clearImgCache();
+    std::vector<Img> list;
+    for (auto& p : dc::newSkins) {
+        Img im; im.path = p;
+        size_t sl = p.rfind('/');
+        im.name = sl == std::string::npos ? p : p.substr(sl + 1);
+        std::vector<uint8_t> d;
+        if (!util::readFile(p, d) || !pck::pngSize(d, im.w, im.h)) continue;
+        im.size = d.size();
+        list.push_back(im);
+    }
+    Img dummy;
+    pickImageFrom("取り込んだスキンを確認 (展開図 / 3Dプレビュー)", list, true, "", dummy, "閉じる");
+}
 static void actDiscord() {
     util::Config c = util::loadConfig();   // 毎回 config.ini を読み直す
     cfg.token = c.token; cfg.channel = c.channel;
@@ -1182,15 +1310,17 @@ static void actDiscord() {
     else {
         msg = std::to_string(total) + " 個を保存しました。";
         if (dc::nSkin) msg += "\nスキン: " + std::to_string(dc::nSkin) + " 枚";
+        if (dc::nHd) msg += "\n  うち大きなスキン (128〜512): " + std::to_string(dc::nHd) + " 枚";
         if (dc::nCape) msg += "\nマント: " + std::to_string(dc::nCape) + " 枚";
         if (dc::nGif) msg += "\nGIF: " + std::to_string(dc::nGif) + " 個 (anim/ に保存)";
         if (dc::nZip) msg += "\nZIP: " + std::to_string(dc::nZip) + " 個 (anim/ に保存)";
         if (dc::nBoth) msg += "\n64x32 でどちらか分からない画像: " + std::to_string(dc::nBoth) + " 枚 (スキンにもマントにも入れました)";
-        if (dc::nSkip) msg += "\n使えないファイル: " + std::to_string(dc::nSkip) + " 個 (PNGは 64x64 / 64x32 のみ・GIF/ZIPは16MBまで)";
+        if (dc::nSkip) msg += "\n使えないファイル: " + std::to_string(dc::nSkip) + " 個 (PNGは 64〜512 のスキンの形のみ・GIF/ZIPは16MBまで)";
         if (dc::nFail) msg += "\n取得に失敗: " + std::to_string(dc::nFail) + " 枚 (もう一度同期すると再挑戦します)";
     }
     setStatus(total ? "Discordから " + std::to_string(total) + " 個のファイルを保存しました" : "Discord同期: 新しい画像はありません");
-    dialog("Discord同期", msg, {"OK"}, 0);
+    bool review = !dc::newSkins.empty();
+    if (dialog("Discord同期", msg, review ? std::vector<std::string>{"スキンを確認", "OK"} : std::vector<std::string>{"OK"}, 0) == 0 && review) reviewNewSkins();
 }
 
 static const int HN = 4;   // ホームのボタン数
@@ -1238,7 +1368,7 @@ static std::vector<Row> buildRows() {
         bool slim = getProp(a, "ANIM") == "0x00080000";
         auto tg = [ai] { pck::Asset& s = P.a[ai]; setProp(s, "ANIM", getProp(s, "ANIM") == "0x00080000" ? "0x00040000" : "0x00080000"); markDirty(); };
         field("モデル", slim ? "スリム (Alex)" : "クラシック (Steve)", tg)->onLR = tg;
-        field("スキン画像", "置き換える...", [ai] { Img im; if (pickImage("スキン画像を選ぶ (64x64 / 64x32)", skinDir(), fitsSkin, im)) replaceData(ai, im); });
+        field("スキン画像", "置き換える...", [ai] { Img im; if (pickImage("スキン画像を選ぶ (64x64 / 64x32 / 128〜512)", skinDir(), fitsSkin, im, true)) replaceData(ai, im); });
         std::string cp = getProp(a, "CAPEPATH");
         Row* r = field("マント", cp.empty() ? "なし (Aで選ぶ)" : cp, [ai] { Img im; if (pickImage("マント画像を選ぶ (64x32)", capeDir(), fitsCape, im)) { int ni = setCape(ai, im); sel = ni; } });
         r->onX = [ai] { if (!getProp(P.a[ai], "CAPEPATH").empty()) removeCape(ai); };
@@ -1557,6 +1687,7 @@ static void drawHome() {
 
 static void drawAll() {
     hits.clear();
+    trimTextures();
     if (home) { drawHome(); return; }
     fill(0, 0, 1280, 720, BG);
     drawSidebar(); drawPreview(); drawDetails(); drawMenuBar(); drawInfoBar(); drawFooter();

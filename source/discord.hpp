@@ -19,12 +19,13 @@ static std::atomic<int> st{upd::IDLE};          // upd::Phase を流用 (IDLE / 
 static std::atomic<int> nowN{0}, totalN{0};     // 取得の進み具合 (枚数)
 static std::atomic<bool> cancelFlag{false};
 static std::string err;                          // FAILED の後で読む
-static int nSkin = 0, nCape = 0, nBoth = 0, nSkip = 0, nFail = 0, nGif = 0, nZip = 0;   // DONE の後で読む
+static int nSkin = 0, nCape = 0, nBoth = 0, nSkip = 0, nFail = 0, nGif = 0, nZip = 0, nHd = 0;   // DONE の後で読む (nHd = 128〜512 の大きなスキン、nSkin の内数)
+static std::vector<std::string> newSkins;        // 今回 skins/ に保存したスキンのパス (取り込み後の確認用。DONE の後で読む)
 static std::string cfgToken, cfgChannel, dirSkin, dirCape, dirAnim;
 static Thread th;
 static bool thActive = false;
 
-static const size_t MAX_PNG = 1u << 20;         // 1MB 超の PNG は取らない (スキンは 32KB 以下が普通)
+static const size_t MAX_PNG = 4u << 20;         // 4MB 超の PNG は取らない (64x64 は 32KB 以下が普通。512x512 でも 1〜2MB ほど)
 static const size_t MAX_ANIM = 16u << 20;      // GIF / ZIP は 16MB まで
 
 static std::string seenPath() { return std::string(util::BASE) + "discord_seen.txt"; }
@@ -138,10 +139,16 @@ static void syncMain(void*) {
         uint32_t w = 0, h = 0;
         dccore::Kind k = pck::pngSize(data, w, h) ? dccore::classify(a->name, w, h) : dccore::SKIP;
         bool saved = true;
-        if (k == dccore::SKIN || k == dccore::BOTH) saved = util::writeAtomic(destPath(dirSkin, a->name, a->id), data) && saved;
+        std::string skinPath;
+        if (k == dccore::SKIN || k == dccore::BOTH) {
+            skinPath = destPath(dirSkin, a->name, a->id);
+            saved = util::writeAtomic(skinPath, data) && saved;
+        }
         if (k == dccore::CAPE || k == dccore::BOTH) saved = util::writeAtomic(destPath(dirCape, a->name, a->id), data) && saved;
         if (!saved) { nFail++; nowN++; continue; }  // SD に書けなかった (空き容量など)
         markSeen(a->id);
+        if (!skinPath.empty()) newSkins.push_back(skinPath);
+        if (k == dccore::SKIN && w > 64) nHd++;
         if (k == dccore::SKIN) nSkin++; else if (k == dccore::CAPE) nCape++; else if (k == dccore::BOTH) nBoth++; else nSkip++;
         nowN++;
     }
@@ -164,7 +171,7 @@ inline bool start(const std::string& token, const std::string& channel, const st
     if (t.compare(0, 4, "Bot ") == 0) t = util::trim(t.substr(4));   // "Bot " を付けて貼っても動くように
     std::string c = util::trim(channel);
     err.clear();
-    nSkin = nCape = nBoth = nSkip = nFail = nGif = nZip = 0; nowN = 0; totalN = 0; cancelFlag = false;
+    nSkin = nCape = nBoth = nSkip = nFail = nGif = nZip = nHd = 0; newSkins.clear(); nowN = 0; totalN = 0; cancelFlag = false;
     if (t.empty() || c.empty()) { err = "config.ini に token と channel を書いてください"; st = upd::FAILED; return false; }
     for (char ch : c) if (ch < '0' || ch > '9') { err = "channel はチャンネルIDの数字だけを書いてください"; st = upd::FAILED; return false; }
     cfgToken = t; cfgChannel = c; dirSkin = skinDir; dirCape = capeDir; dirAnim = animDir;
