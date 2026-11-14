@@ -13,7 +13,18 @@ int main() {
     assert(classify("青のスキン.png", 64, 32) == SKIN);
     assert(classify("image.png", 64, 32) == BOTH);
     assert(classify("cape_skin.png", 64, 32) == BOTH);       // 両方入っていれば決められない
-    assert(classify("a.png", 128, 128) == SKIP);
+    assert(classify("a.png", 128, 128) == SKIN);             // 大きなスキン (展開図) は取り込む。使うときに 64 へ縮小する
+    assert(classify("a.png", 256, 256) == SKIN);
+    assert(classify("a.png", 512, 512) == SKIN);
+    assert(classify("a.png", 128, 64) == SKIN);              // 64x32 形式の大きなもの
+    assert(classify("a.png", 512, 256) == SKIN);
+    assert(classify("my_cape.png", 128, 64) == SKIP);        // 大きなマントは使えない
+    assert(classify("cape_skin.png", 256, 128) == SKIN);
+    assert(classify("a.png", 1024, 1024) == SKIP);           // 512 まで
+    assert(classify("a.png", 192, 192) == SKIP);             // 64 の 2 のべき乗倍だけ
+    assert(classify("a.png", 256, 64) == SKIP);
+    assert(isSkinSize(64, 64) && isSkinSize(64, 32) && isSkinSize(512, 512) && isSkinSize(256, 128));
+    assert(!isSkinSize(64, 48) && !isSkinSize(512, 128) && !isSkinSize(0, 0));
     assert(classify("a.png", 64, 48) == SKIP);
     assert(classify("a.png", 22, 17) == SKIP);
 
